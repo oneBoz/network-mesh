@@ -1,0 +1,19 @@
+{
+  "name": "mesh-ts-backend",
+  "version": "0.1.0",
+  "description": "Self-healing overlay mesh (SWIM gossip, lighthouse join brokers, service discovery) plus the dashboard control plane. Node built-ins only.",
+  "type": "module",
+  "scripts": {
+    "lighthouse": "tsx src/lighthouse.ts",
+    "node": "tsx src/node.ts",
+    "typecheck": "tsc --noEmit",
+    "demo": "bash scripts/demo.sh",
+    "dev": "tsx backend/src/server.ts",
+    "backend": "tsx backend/src/server.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0"
+  }
+}

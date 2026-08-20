@@ -1,0 +1,23 @@
+# dependencies
+node_modules/
+
+# build caches
+*.tsbuildinfo
+
+# environment / secrets (MESH_KEY etc.)
+.env
+.env.*
+!.env.example
+
+# logs
+*.log
+npm-debug.log*
+logs/
+
+# editor & OS junk
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/extensions.json
+*.swp

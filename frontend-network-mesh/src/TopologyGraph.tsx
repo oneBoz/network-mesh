@@ -1,0 +1,348 @@
+import { useEffect, useRef, useState } from "react";
+import type { MeshState, NodeStatus, ThreatAssignmentEvent } from "./types";
+import { consensus } from "./consensus";
+import { DEFENSE_SYSTEMS, defenseTooltip } from "./defense";
+
+const COLOR: Record<NodeStatus | "unknown", string> = {
+  alive: "var(--alive)",
+  suspect: "var(--suspect)",
+  dead: "var(--dead)",
+  unknown: "var(--faint)",
+};
+
+const W = 800;
+const H = 520;
+const MARGIN = 30;
+const POS_KEY = "mesh-topology-positions";
+const LINKS_KEY = "mesh-topology-routers";
+const CLICK_SLOP = 4; // px of pointer travel below which pointerdown→up counts as a click
+
+interface XY {
+  x: number;
+  y: number;
+}
+
+type Link = [string, string];
+
+/**
+ * Physical-topology overlay: the defense layers hand off through commercial
+ * routers. Routers are pure visualization — they exist only in this file,
+ * never in the mesh, the API, or gossip. This is the default set; the user
+ * can add (link two glyphs) and remove (click a router) at runtime.
+ */
+const DEFAULT_LINKS: Link[] = [
+  ["maelstrom", "aegis"],
+  ["aegis", "smartfalcon"],
+  ["smartfalcon", "edgefuse"],
+  ["edgefuse", "wisl"],
+];
+const routerId = (a: string, b: string) => `rtr:${a}:${b}`;
+const linkKey = ([a, b]: Link) => (a < b ? `${a}|${b}` : `${b}|${a}`);
+
+function loadJson<T>(key: string, fallback: T): T {
+  try {
+    const raw = localStorage.getItem(key);
+    return raw ? (JSON.parse(raw) as T) : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v));
+
+/**
+ * Live topology. Node color = mesh consensus about that node; a dashed red
+ * ring means the process is actually down (ground truth) — watch the ring
+ * appear instantly on a kill while the fill takes seconds to catch up: that
+ * lag is SWIM's suspect→dead detection window happening in real time.
+ *
+ * Every glyph is draggable; dragged positions and the router set persist in
+ * localStorage. Undragged glyphs keep their computed default (routers: the
+ * live midpoint of their endpoints, so they follow when an endpoint moves).
+ */
+export function TopologyGraph({
+  state,
+  activeThreat,
+}: {
+  state: MeshState;
+  activeThreat?: ThreatAssignmentEvent | null;
+}) {
+  const svgRef = useRef<SVGSVGElement>(null);
+  const [pos, setPos] = useState<Record<string, XY>>(() => loadJson(POS_KEY, {}));
+  const [links, setLinks] = useState<Link[]>(() => loadJson(LINKS_KEY, DEFAULT_LINKS));
+  const [linkMode, setLinkMode] = useState(false);
+  const [linkFrom, setLinkFrom] = useState<string | null>(null);
+  const drag = useRef<{ name: string; dx: number; dy: number; sx: number; sy: number; moved: boolean } | null>(null);
+
+  useEffect(() => {
+    // Debounced: dragging fires setPos per pointermove — persist only once the
+    // position has been stable for a beat, not on every frame.
+    const t = setTimeout(() => localStorage.setItem(POS_KEY, JSON.stringify(pos)), 300);
+    return () => clearTimeout(t);
+  }, [pos]);
+  useEffect(() => {
+    localStorage.setItem(LINKS_KEY, JSON.stringify(links));
+  }, [links]);
+
+  useEffect(() => {
+    if (!linkMode) return;
+    const onKey = (e: KeyboardEvent) => e.key === "Escape" && cancelLinking();
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [linkMode]);
+
+  const cancelLinking = () => {
+    setLinkMode(false);
+    setLinkFrom(null);
+  };
+
+  const resetLayout = () => {
+    setPos({});
+    setLinks(DEFAULT_LINKS);
+    cancelLinking();
+  };
+
+  const lighthouses = state.procs.filter((p) => p.kind === "lighthouse");
+  const nodes = state.procs.filter((p) => p.kind === "node");
+
+  // Defaults for anything never dragged: lighthouses in a top row, nodes on a
+  // circle. Dragged glyphs are pinned by the `pos` state instead.
+  const defaults = new Map<string, XY>();
+  lighthouses.forEach((p, i) =>
+    defaults.set(p.name, { x: ((i + 1) * W) / (lighthouses.length + 1), y: 52 })
+  );
+  const cx = W / 2, cy = 310, r = Math.min(185, 60 + nodes.length * 22);
+  nodes.forEach((p, i) => {
+    const a = (2 * Math.PI * i) / nodes.length - Math.PI / 2;
+    defaults.set(p.name, { x: cx + r * Math.cos(a), y: cy + r * Math.sin(a) });
+  });
+
+  const getPos = (name: string): XY => pos[name] ?? defaults.get(name) ?? { x: cx, y: cy };
+
+  const procNames = new Set(state.procs.map((p) => p.name));
+  const routers = links
+    .filter(([a, b]) => procNames.has(a) && procNames.has(b))
+    .map(([a, b]) => {
+      const id = routerId(a, b);
+      const pa = getPos(a), pb = getPos(b);
+      return { id, a, b, at: pos[id] ?? { x: (pa.x + pb.x) / 2, y: (pa.y + pb.y) / 2 } };
+    });
+
+  // ---------- add / remove routers by clicking ----------
+  const clickGlyph = (name: string) => {
+    if (!linkMode) return;
+    if (!linkFrom) return setLinkFrom(name);
+    if (linkFrom === name) return setLinkFrom(null); // clicking it again deselects
+    const next: Link = [linkFrom, name];
+    setLinks((prev) => (prev.some((l) => linkKey(l) === linkKey(next)) ? prev : [...prev, next]));
+    cancelLinking();
+  };
+
+  const clickRouter = (rt: { id: string; a: string; b: string }) => {
+    setLinks((prev) => prev.filter((l) => linkKey(l) !== linkKey([rt.a, rt.b])));
+    setPos((prev) => {
+      if (!(rt.id in prev)) return prev;
+      const { [rt.id]: _dropped, ...rest } = prev;
+      return rest;
+    });
+  };
+
+  // ---------- drag handlers (pointer capture keeps events on the glyph) ----------
+  const toSvg = (e: React.PointerEvent): XY => {
+    const m = svgRef.current!.getScreenCTM();
+    if (!m) return { x: 0, y: 0 };
+    const p = new DOMPoint(e.clientX, e.clientY).matrixTransform(m.inverse());
+    return { x: p.x, y: p.y };
+  };
+
+  const startDrag = (name: string, current: XY) => (e: React.PointerEvent<SVGGElement>) => {
+    const p = toSvg(e);
+    drag.current = { name, dx: current.x - p.x, dy: current.y - p.y, sx: p.x, sy: p.y, moved: false };
+    e.currentTarget.setPointerCapture(e.pointerId);
+  };
+  const moveDrag = (e: React.PointerEvent<SVGGElement>) => {
+    const d = drag.current;
+    if (!d) return;
+    const p = toSvg(e);
+    if (!d.moved && Math.hypot(p.x - d.sx, p.y - d.sy) < CLICK_SLOP) return;
+    d.moved = true;
+    setPos((prev) => ({
+      ...prev,
+      [d.name]: {
+        x: clamp(p.x + d.dx, MARGIN, W - MARGIN),
+        y: clamp(p.y + d.dy, MARGIN, H - MARGIN),
+      },
+    }));
+  };
+  const endDrag = (onClick?: () => void) => () => {
+    if (drag.current && !drag.current.moved) onClick?.();
+    drag.current = null;
+  };
+  const dragProps = (name: string, current: XY, onClick?: () => void) => ({
+    onPointerDown: startDrag(name, current),
+    onPointerMove: moveDrag,
+    onPointerUp: endDrag(onClick),
+    onPointerCancel: endDrag(),
+    style: {
+      cursor: linkMode && onClick ? "crosshair" : "grab",
+      touchAction: "none",
+    } as React.CSSProperties,
+  });
+
+  // Gossip web: an edge from each reachable observer to every peer it believes
+  // alive, deduped by unordered pair so A↔B is drawn once, not twice.
+  const nodeNames = new Set(nodes.map((p) => p.name));
+  const edgeMap = new Map<string, { from: string; to: string }>();
+  for (const v of state.views) {
+    if (!v.reachable || !nodeNames.has(v.id)) continue;
+    for (const [peer, entry] of Object.entries(v.view)) {
+      if (entry.status !== "alive" || !nodeNames.has(peer)) continue;
+      const key = v.id < peer ? `${v.id} ${peer}` : `${peer} ${v.id}`;
+      if (!edgeMap.has(key)) edgeMap.set(key, { from: v.id, to: peer });
+    }
+  }
+  const edges = [...edgeMap.values()];
+
+  if (!state.procs.length) {
+    return <div className="empty">No processes yet — boot the demo mesh or add servers.</div>;
+  }
+
+  return (
+    <>
+      <div className="row" style={{ marginBottom: 6, alignItems: "center", gap: 8 }}>
+        <button onClick={() => (linkMode ? cancelLinking() : setLinkMode(true))}
+          className={linkMode ? "primary" : undefined}>
+          {linkMode ? "cancel" : "+ router"}
+        </button>
+        <button onClick={resetLayout}>reset layout</button>
+        <span style={{ color: "var(--muted)", fontSize: 12 }}>
+          {linkMode
+            ? linkFrom
+              ? `linking from ${DEFENSE_SYSTEMS[linkFrom]?.name ?? linkFrom} — click the other endpoint (esc cancels)`
+              : "click the two glyphs to join through a router (esc cancels)"
+            : "drag to rearrange · click a router to remove it"}
+        </span>
+      </div>
+
+      <svg ref={svgRef} viewBox={`0 0 ${W} ${H}`}>
+        {/* Physical links through commercial routers (visual only) */}
+        {routers.map((rt) => {
+          const pa = getPos(rt.a), pb = getPos(rt.b);
+          return (
+            <g key={`link-${rt.id}`}>
+              <line x1={pa.x} y1={pa.y} x2={rt.at.x} y2={rt.at.y}
+                stroke="var(--muted)" strokeOpacity={0.35} strokeWidth={1.5} strokeDasharray="6 5" />
+              <line x1={rt.at.x} y1={rt.at.y} x2={pb.x} y2={pb.y}
+                stroke="var(--muted)" strokeOpacity={0.35} strokeWidth={1.5} strokeDasharray="6 5" />
+            </g>
+          );
+        })}
+
+        {edges.map((e, i) => {
+          const a = getPos(e.from), b = getPos(e.to);
+          return (
+            <line key={i} x1={a.x} y1={a.y} x2={b.x} y2={b.y}
+              stroke="var(--alive)" strokeOpacity={0.12} strokeWidth={1.5} />
+          );
+        })}
+
+        {routers.map((rt) => (
+          <g key={rt.id} transform={`translate(${rt.at.x},${rt.at.y})`}
+            {...dragProps(rt.id, rt.at, () => clickRouter(rt))}
+            style={{ cursor: "grab", touchAction: "none" }}>
+            <title>Commercial router — visualization only · click to remove, drag to move</title>
+            <rect x={-13} y={-8} width={26} height={16} rx={3}
+              fill="var(--panel, #111B2E)" stroke="var(--muted)" strokeWidth={1.5} />
+            <line x1={-6} y1={-8} x2={-9} y2={-15} stroke="var(--muted)" strokeWidth={1.5} />
+            <line x1={6} y1={-8} x2={9} y2={-15} stroke="var(--muted)" strokeWidth={1.5} />
+            <circle cx={-6} cy={0} r={1.5} fill="var(--muted)" />
+            <circle cx={0} cy={0} r={1.5} fill="var(--muted)" />
+            <circle cx={6} cy={0} r={1.5} fill="var(--muted)" />
+            <text y={22} textAnchor="middle" fill="var(--muted)" fontSize={9}>router</text>
+          </g>
+        ))}
+
+        {lighthouses.map((p) => {
+          const at = getPos(p.name);
+          return (
+            <g key={p.name} transform={`translate(${at.x},${at.y})`}
+              opacity={p.running ? 1 : 0.35} {...dragProps(p.name, at, () => clickGlyph(p.name))}>
+              {linkFrom === p.name && (
+                <circle r={24} fill="none" stroke="var(--accent, #3E9BFF)" strokeWidth={2} strokeDasharray="3 3" />
+              )}
+              <rect x={-13} y={-13} width={26} height={26} rx={5}
+                transform="rotate(45)" fill="none" stroke="var(--lh)" strokeWidth={2.5} />
+              <circle r={4} fill={p.running ? "var(--lh)" : "var(--dead)"} />
+              <text y={32} textAnchor="middle" fill="var(--muted)" fontSize={11}>
+                {p.name}
+              </text>
+            </g>
+          );
+        })}
+
+        {nodes.map((p) => {
+          const at = getPos(p.name);
+          const belief = consensus(state, p.name);
+          const isPrimary = activeThreat?.primary === p.name;
+          const fallbackRank = activeThreat ? activeThreat.fallbacks.indexOf(p.name) : -1;
+          return (
+            <g key={p.name} transform={`translate(${at.x},${at.y})`}
+              {...dragProps(p.name, at, () => clickGlyph(p.name))}>
+              {defenseTooltip(p.name) && <title>{defenseTooltip(p.name)}</title>}
+              {linkFrom === p.name && (
+                <circle r={30} fill="none" stroke="var(--accent, #3E9BFF)" strokeWidth={2} strokeDasharray="3 3" />
+              )}
+              {isPrimary && (
+                <>
+                  <circle className="threat-ring" r={27} fill="none"
+                    stroke="var(--suspect)" strokeWidth={2.5} />
+                  <text y={-33} textAnchor="middle" fill="var(--suspect)" fontSize={11} fontWeight={700}>
+                    ⚑ {activeThreat!.threat}
+                  </text>
+                </>
+              )}
+              {fallbackRank >= 0 && (
+                <>
+                  <circle r={25} fill="none" stroke="var(--suspect)" strokeOpacity={0.45}
+                    strokeWidth={1.5} strokeDasharray="5 4" />
+                  <text x={20} y={-20} textAnchor="middle" fill="var(--suspect)"
+                    fillOpacity={0.8} fontSize={10} fontWeight={700}>
+                    {fallbackRank + 2}
+                  </text>
+                </>
+              )}
+              {!p.running && (
+                <circle r={26} fill="none" stroke="var(--dead)" strokeWidth={2} strokeDasharray="4 4" />
+              )}
+              <circle r={19} fill={COLOR[belief]} fillOpacity={0.22}
+                stroke={COLOR[belief]} strokeWidth={2.5} />
+              <text textAnchor="middle" dy={4} fill="var(--text)"
+                fontSize={DEFENSE_SYSTEMS[p.name] ? 9 : 12} fontWeight={700}>
+                {DEFENSE_SYSTEMS[p.name]?.short ?? p.name}
+              </text>
+              <text y={36} textAnchor="middle" fill="var(--muted)" fontSize={11}>
+                {DEFENSE_SYSTEMS[p.name]?.layer ?? p.service ?? ""}
+              </text>
+            </g>
+          );
+        })}
+
+        <g transform={`translate(14,${H - 14})`} fontSize={11} fill="var(--muted)">
+          <circle cx={4} r={5} fill="var(--alive)" fillOpacity={0.4} stroke="var(--alive)" />
+          <text x={14} dy={4}>alive (belief)</text>
+          <circle cx={110} r={5} fill="var(--suspect)" fillOpacity={0.4} stroke="var(--suspect)" />
+          <text x={120} dy={4}>suspect</text>
+          <circle cx={190} r={5} fill="var(--dead)" fillOpacity={0.4} stroke="var(--dead)" />
+          <text x={200} dy={4}>dead</text>
+          <circle cx={255} r={7} fill="none" stroke="var(--dead)" strokeDasharray="3 3" />
+          <text x={268} dy={4}>process actually down</text>
+          <line x1={410} y1={0} x2={432} y2={0} stroke="var(--muted)" strokeOpacity={0.5}
+            strokeWidth={1.5} strokeDasharray="6 5" />
+          <text x={438} dy={4}>via commercial router</text>
+          <circle cx={575} r={7} fill="none" stroke="var(--suspect)" strokeWidth={2} />
+          <text x={588} dy={4}>engaging threat</text>
+        </g>
+      </svg>
+    </>
+  );
+}
