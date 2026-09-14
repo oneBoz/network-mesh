@@ -8,9 +8,20 @@
  */
 import { spawn } from "node:child_process";
 import type { ChildProcess } from "node:child_process";
+import { hostname } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ProcSpec, ProcState } from "./types.js";
+
+/** Name of this machine, stamped on every node we spawn (--device) and on
+ *  every message they originate, so other devices can say where it came from. */
+export const DEVICE = process.env.DEVICE_NAME?.trim() || hostname();
+/** DEVICE reduced to a safe id fragment: "Dingyi's Mac" → "dingyi-s-mac". */
+export const DEVICE_SLUG = DEVICE.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 20) || "device";
+/** Public host of THIS machine (ADVERTISE env). Set when the dashboard itself
+ *  runs on a host with a public IP and joins a lighthouse over loopback —
+ *  otherwise that lighthouse would record its nodes as 127.0.0.1. */
+export const ADVERTISE = process.env.ADVERTISE?.trim() || undefined;
 
 /** Repo root — cwd for children so `tsx` and src/ resolve. */
 export const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
@@ -77,7 +88,8 @@ export class ProcManager {
     if (spec.kind === "lighthouse") {
       args.push("--port", String(spec.port));
     } else {
-      args.push("--id", spec.name, "--port", String(spec.port), "--http", String(spec.httpPort));
+      args.push("--id", spec.name, "--port", String(spec.port), "--http", String(spec.httpPort), "--device", DEVICE);
+      if (ADVERTISE) args.push("--advertise", ADVERTISE);
       if (spec.service) args.push("--service", spec.service);
       const lh = this.lighthouseAddrs();
       if (lh) args.push("--lighthouses", lh);

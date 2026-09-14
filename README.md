@@ -55,6 +55,7 @@ Then try the threat ladder:
 | Kill `aegis`, wait ~6 s, inject `missile` again | peers log `aegis: alive → suspect → dead`; primary becomes **smartfalcon** |
 | Revive `aegis` | it rejoins, logs `refuting rumor that I am dead — incarnation now 1`, and is primary again |
 | Kill all three lighthouses | nothing changes for the running mesh; only brand-new joins would wait |
+| Switch to **GCS**, report `swarm` | Latest engagement shows **MAELSTROM Command** with fallbacks; back in Command, the signal is in the feed with `5/5 agree` and the topology rings light up |
 
 The smoke test prints the same story as text and exits 0 on success:
 
@@ -68,12 +69,40 @@ resolve aegis via smartfalcon → aegis
 PASS
 ```
 
+### Two modes: Command and GCS
+
+The header has a **Command / GCS** switch (also `?mode=gcs` in the URL). Both
+run on the same control plane, so one device can be both: open two tabs.
+
+- **Command** is the full picture: topology, convergence matrix, fleet
+  controls, threat injection, live log, and a **GCS signals** feed showing every
+  signal on the mesh with the actions taken.
+- **GCS** (Ground Control Station) is the operator screen: name your station,
+  press a threat button, and the mesh decides. The **Latest engagement** card
+  and the feed update live for *every* station's signals, including ones sent
+  from other devices over the internet.
+
+A signal is a data-channel message (`kind: gcs.signal`) originated by one local
+node and flooded across the mesh with a TTL, dedupe by id, and **relays first**:
+peers that advertise a public address (the VPS node) are always among the first
+hops, so a signal crossing NATs takes the reliable path before the hole-punched
+ones. Every node that receives it runs the same deterministic matchmaking and
+stores the result in its inbox. The dashboard merges its local nodes' inboxes
+and shows how many computed the identical answer (`5/5 agree`). No station
+talks to another station; they all just read the mesh.
+
+Under the hood each node exposes `POST /send {kind, body, to?, station?}` and
+`GET /inbox?after=<ms>`; the control plane wraps them as `POST /api/signal`
+and streams new messages over SSE.
+
 ### Environment variables (`.env.example`)
 
 | Variable | Default | Meaning |
 |---|---|---|
 | `MESH_KEY` | `hackathon-demo-key` | Shared HMAC secret. Every process (local and remote) must match. Empty = unsigned mesh. |
 | `EXTRA_LIGHTHOUSES` | empty | `host:port,host:port` of lighthouses on other machines. Every node the dashboard spawns joins them too. |
+| `DEVICE_NAME` | `local-device` (Docker) / hostname (native) | Label for this machine on other devices' dashboards and on the signals it sends; also the id suffix when several devices boot the demo. |
+| `ADVERTISE` | empty | Public IP of *this* host. Only for a dashboard running on a VPS (see the host-network override). |
 
 Sample data is built in: the 5 defense systems and their skill table live in
 [`backend-network-mesh/src/skills.ts`](backend-network-mesh/src/skills.ts);
@@ -139,6 +168,20 @@ node probe each other directly across the internet (UDP hole punching).
 Within a few seconds `vps-1` appears alive in every local node's view, and a
 threat asked on either side returns the same ranked assignment.
 
+The dashboard shows the other machine as a first-class member:
+
+- Header: an **n/m remote · internet** counter.
+- Topology: the external lighthouse as a dashed diamond marked INTERNET, and
+  each remote node as a circle with a dashed blue ring and its public address,
+  linked to the local nodes that currently believe it alive. Threat rings and
+  fallback ranks apply to remote nodes exactly like local ones.
+- Convergence matrix: remote nodes as extra columns (⟡). Rows stay local,
+  because the dashboard never polls another machine; what it knows about a
+  remote comes purely from gossip, which is the point.
+- **Other devices** list in the fleet panel: address, service, consensus
+  status and how many local observers see it. No kill or revive buttons, since
+  you cannot crash someone else's process.
+
 How it works and what it needs:
 
 - **No port forwarding, no public IP on the local machine.** Only the VPS
@@ -151,6 +194,27 @@ How it works and what it needs:
   node, and the mesh keeps membership through it (indirect probes).
 - Encryption is the next step: traffic is HMAC-signed and replay-protected
   but not encrypted. See PLAN.md for the WireGuard/Nebula/Noise options.
+
+**Several devices booting the demo.** Node ids must be unique across the whole
+mesh, so whenever a fleet joins external lighthouses (or advertises a public
+address) Boot demo names its nodes `aegis-<device>`, `wisl-<device>` and so on,
+from `DEVICE_NAME`. Service names, skills and matchmaking are unchanged, and
+the dashboard still shows the system names. Two Mac minis can therefore both
+press Boot demo and end up as one ten-node mesh: each Command panel shows the
+other's five nodes as remotes, and a GCS signal from either appears on both.
+
+**A full dashboard on the VPS** (the VPS as a complete second device with its
+own Command and GCS screens) uses the host-network override:
+
+```sh
+ADVERTISE=<vps public ip> DEVICE_NAME=vps \
+  docker compose -p mesh-dashboard -f docker-compose.yml -f docker-compose.host.yml up -d --build
+ssh -L 7070:127.0.0.1:7070 <user>@<vps public ip>     # then open http://localhost:7070
+```
+
+Its lighthouse on UDP 5001 replaces the lightweight remote site, so other
+devices keep using `EXTRA_LIGHTHOUSES=<vps public ip>:5001`. Open UDP 4001-4010
+and 5001-5003 on the VPS firewall.
 
 Two devices on the **same LAN** need no VPS at all: run the lighthouse on
 either one and point the other at `<its LAN ip>:5001` via `EXTRA_LIGHTHOUSES`.
@@ -176,7 +240,8 @@ The compose file publishes UDP 4001-4008 and 5001-5003 for exactly this.
 ```
 Dockerfile                  multi-stage build: dashboard + control plane in one pinned Node 24 image
 docker-compose.yml          the whole system, `docker compose up`
-docker-compose.remote.yml   optional remote site (lighthouse + node) for a public VPS
+docker-compose.remote.yml   optional lightweight remote site (lighthouse + node) for a public VPS
+docker-compose.host.yml     override: the full dashboard on a public VPS as a second device
 .env.example                MESH_KEY, EXTRA_LIGHTHOUSES
 scripts/smoke.mjs           end-to-end check against a running dashboard
 backend-network-mesh/       mesh + control plane (see its README for the protocol and API)

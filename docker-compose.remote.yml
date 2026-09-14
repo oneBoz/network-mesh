@@ -46,5 +46,7 @@ services:
       - 127.0.0.1:5001
       - --advertise
       - ${PUBLIC_IP:?set PUBLIC_IP to this machine's public IP or DNS name}
+      - --device
+      - ${DEVICE_NAME:-vps}
     healthcheck: { disable: true }
     restart: unless-stopped

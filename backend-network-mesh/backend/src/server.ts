@@ -20,6 +20,11 @@
  *   POST   /api/procs/<name>/start     revive a crashed process
  *   DELETE /api/procs/<name>           kill + forget
  *   GET    /api/resolve/<svc>?via=<id> service discovery through a live node
+ *   POST   /api/threat                 {threat, via?} → inject a threat through a node
+ *   POST   /api/signal                 {threat, station?, note?, via?} → a GCS signal:
+ *                                      sent as a data-channel message through one
+ *                                      node, flooded to every device on the mesh;
+ *                                      each node matchmakes it independently
  *
  * Also serves the dashboard's production build statically if one exists —
  * by default from a sibling checkout of the frontend repo
@@ -34,8 +39,8 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { createServer as createTcpServer } from "node:net";
 import { readFile, stat } from "node:fs/promises";
 import { extname, join, normalize } from "node:path";
-import { ProcManager, ROOT } from "./procman.js";
-import type { LogEvent, MeshState, NodeView, ProcSpec, ThreatAssignmentEvent, ThreatType } from "./types.js";
+import { ADVERTISE, DEVICE, DEVICE_SLUG, ProcManager, ROOT } from "./procman.js";
+import type { InboxMessage, LogEvent, MeshState, NodeStatus, NodeView, ProcSpec, ProcState, RemoteMember, ThreatAssignmentEvent, ThreatType } from "./types.js";
 
 const portFlag = process.argv.indexOf("--port");
 const PORT = portFlag !== -1 ? Number(process.argv[portFlag + 1]) : Number(process.env.PORT ?? 7070);
@@ -69,7 +74,102 @@ const procman = new ProcManager((source, line) => {
 const MAX_THREAT_HISTORY = 20;
 const recentThreats: ThreatAssignmentEvent[] = []; // most recent last, capped
 
-let lastState: MeshState = { ts: Date.now(), procs: [], views: [], threats: recentThreats };
+// ---------- data channel: merge every local node's inbox ----------
+const MAX_MESSAGES = 100;
+const messages: InboxMessage[] = []; // most recent last
+const messageIndex = new Map<string, InboxMessage>();
+const inboxCursor = new Map<string, number>(); // node → last receivedAt fetched
+
+interface NodeInboxEntry {
+  id: string; at: number; kind: string; from: InboxMessage["from"]; to?: string;
+  body: Record<string, unknown>; assignment?: InboxMessage["assignment"]; receivedAt: number;
+}
+
+async function pollInbox(node: string, httpPort: number): Promise<void> {
+  try {
+    const after = inboxCursor.get(node) ?? 0;
+    const r = await fetch(`http://127.0.0.1:${httpPort}/inbox?after=${after}`, {
+      signal: AbortSignal.timeout(POLL_TIMEOUT_MS),
+    });
+    const body = (await r.json()) as { messages: NodeInboxEntry[] };
+    for (const m of body.messages) {
+      inboxCursor.set(node, Math.max(inboxCursor.get(node) ?? 0, m.receivedAt));
+      const existing = messageIndex.get(m.id);
+      if (!existing) {
+        const merged: InboxMessage = {
+          id: m.id, at: m.at, kind: m.kind, from: m.from, to: m.to, body: m.body,
+          assignment: m.assignment, receivedAt: m.receivedAt, seenBy: [node], agree: 1, consistent: true,
+        };
+        messageIndex.set(m.id, merged);
+        messages.push(merged);
+        while (messages.length > MAX_MESSAGES) messageIndex.delete(messages.shift()!.id);
+        broadcast("message", merged);
+        if (m.kind === "gcs.signal") {
+          const a = m.assignment;
+          broadcast("log", {
+            source: "backend",
+            line: `signal ${String(m.body.threat)} from ${m.from.station ?? m.from.node}@${m.from.device ?? "?"} → primary ${a?.primary ?? "NONE (leaked!)"}${a?.fallbacks.length ? `, fallbacks ${a.fallbacks.join(" → ")}` : ""}`,
+            ts: Date.now(),
+          } satisfies LogEvent);
+        }
+      } else if (!existing.seenBy.includes(node)) {
+        existing.seenBy.push(node);
+        // Every node should have decided the same thing — the "one entity" check.
+        // A node whose view had not converged at that instant answers differently.
+        const same = !m.assignment || !existing.assignment
+          || (m.assignment.primary === existing.assignment.primary
+            && m.assignment.fallbacks.join() === existing.assignment.fallbacks.join());
+        if (same) existing.agree++;
+        existing.consistent = existing.agree === existing.seenBy.length;
+      }
+    }
+  } catch {
+    // unreachable node: its inbox is re-fetched from the same cursor next round
+  }
+}
+
+let lastState: MeshState = {
+  ts: Date.now(), device: DEVICE, procs: [], views: [], threats: recentThreats,
+  remotes: [], extraLighthouses: procman.extraLighthouses(), messages,
+};
+
+const RANK: Record<NodeStatus, number> = { alive: 0, suspect: 1, dead: 2 };
+
+/** Members that appear in local nodes' views but are not our processes: nodes
+ *  on other machines that joined through a shared lighthouse. Status is the
+ *  majority opinion of the local observers (ties broken pessimistically), the
+ *  same rule the frontend uses for consensus colouring. */
+function deriveRemotes(procs: ProcState[], views: NodeView[]): RemoteMember[] {
+  const local = new Set(procs.map((p) => p.name));
+  const acc = new Map<string, RemoteMember>();
+  for (const v of views) {
+    if (!v.reachable) continue;
+    for (const [id, e] of Object.entries(v.view)) {
+      if (local.has(id) || !e.info) continue;
+      let r = acc.get(id);
+      if (!r) {
+        r = {
+          id, host: e.info.host, port: e.info.port, httpPort: e.info.httpPort,
+          service: e.info.service, skills: e.info.skills,
+          status: e.status, inc: e.inc, since: e.since, observers: 0,
+          votes: { alive: 0, suspect: 0, dead: 0 },
+        };
+        acc.set(id, r);
+      }
+      r.observers++;
+      r.votes[e.status]++;
+      if (e.inc > r.inc) r.inc = e.inc;
+      if (e.since < r.since) r.since = e.since;
+      // Prefer the address held by an observer that currently reaches it.
+      if (e.status === "alive") { r.host = e.info.host; r.port = e.info.port; }
+    }
+  }
+  for (const r of acc.values()) {
+    r.status = (Object.keys(r.votes) as NodeStatus[]).reduce((best, s) =>
+      r.votes[s] > r.votes[best] || (r.votes[s] === r.votes[best] && RANK[s] > RANK[best]) ? s : best);
+  }
+  return [...acc.values()].sort((a, b) => a.id.localeCompare(b.id));
+}
 
 async function pollNode(id: string, httpPort: number): Promise<NodeView> {
   try {
@@ -98,7 +198,11 @@ async function poll(): Promise<void> {
         : Promise.resolve<NodeView>({ id: n.name, reachable: false, inc: 0, service: n.service, view: {} })
     )
   );
-  lastState = { ts: Date.now(), procs, views, threats: recentThreats };
+  await Promise.all(nodes.filter((n) => n.running && n.httpPort).map((n) => pollInbox(n.name, n.httpPort!)));
+  lastState = {
+    ts: Date.now(), device: DEVICE, procs, views, threats: recentThreats,
+    remotes: deriveRemotes(procs, views), extraLighthouses: procman.extraLighthouses(), messages,
+  };
   broadcast("state", lastState);
 }
 
@@ -181,8 +285,14 @@ async function bootDemo(): Promise<void> {
   //   wisl         EMP Defense — WISL (anti-swarm): EMP jamming / e-warfare
   //                specialist; cheaper to send for EMF threats than Layer 1
   //                missiles
-  const ids = ["maelstrom", "aegis", "smartfalcon", "edgefuse", "wisl"];
-  const services = ids;
+  const services = ["maelstrom", "aegis", "smartfalcon", "edgefuse", "wisl"];
+  // Ids must be unique mesh-wide. When this fleet joins lighthouses on other
+  // machines, every device booting the demo would otherwise register the same
+  // five ids and fight over them — so suffix them with this device's name.
+  // Service names stay as they are: skills, matchmaking and display keys use them.
+  // (Also when this host advertises a public address: it is, by definition, one of several.)
+  const multiDevice = procman.extraLighthouses().length > 0 || !!ADVERTISE;
+  const ids = multiDevice ? services.map((s) => `${s}-${DEVICE_SLUG}`) : services;
   for (const port of [5001, 5002, 5003]) {
     const name = `lh-${port}`;
     if (!procman.get(name)) procman.start(await allocLighthouseSpec(port));
@@ -313,6 +423,30 @@ const server = createServer(async (req, res) => {
       }
     }
 
+    // GCS signal: a data-channel message originated by one local node and
+    // flooded to every member (relays first), which each matchmake on their own.
+    if (path === "/api/signal" && method === "POST") {
+      const body = await readJson(req);
+      const candidates = procman
+        .list()
+        .filter((p) => p.kind === "node" && p.running && p.httpPort && (!body.via || p.name === body.via));
+      const target = candidates[Math.floor(Math.random() * candidates.length)];
+      if (!target) return json(res, 503, { error: "no live node to send through" });
+      const station = typeof body.station === "string" && body.station.trim() ? body.station.trim() : `GCS-${DEVICE}`;
+      const payload: Record<string, unknown> = { threat: body.threat };
+      if (typeof body.note === "string" && body.note.trim()) payload.note = body.note.trim();
+      if (body.pos && typeof body.pos === "object") payload.pos = body.pos;
+      const r = await fetch(`http://127.0.0.1:${target.httpPort}/send`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ kind: "gcs.signal", station, body: payload }),
+        signal: AbortSignal.timeout(1_000),
+      });
+      const answer = (await r.json()) as Record<string, unknown>;
+      if (!r.ok) return json(res, r.status, answer);
+      return json(res, 200, { via: target.name, ...answer });
+    }
+
     // Inject a threat through one node's /threat endpoint (chosen or random).
     // That node matchmakes from its own view and floods the event to the rest —
     // every node then logs the identical assignment ("one entity" in action).
@@ -380,7 +514,7 @@ const server = createServer(async (req, res) => {
 });
 
 server.listen(PORT, HOST, () => {
-  console.log(`[backend] dashboard control plane on http://${HOST}:${PORT}`);
+  console.log(`[backend] dashboard control plane on http://${HOST}:${PORT} (device: ${DEVICE}${ADVERTISE ? `, advertising ${ADVERTISE}` : ""})`);
   const extra = procman.extraLighthouses();
   if (extra.length) console.log(`[backend] nodes will also join external lighthouses: ${extra.join(", ")}`);
   console.log(`[backend] POST /api/demo to boot the standard 3-lighthouse / 5-system defense mesh`);

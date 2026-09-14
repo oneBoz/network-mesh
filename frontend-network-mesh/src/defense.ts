@@ -54,9 +54,36 @@ export const DEFENSE_SYSTEMS: Record<string, DefenseSystem> = {
   },
 };
 
+/**
+ * Look a node up by id, then by its service, then by the id's leading segment
+ * (demo fleets that join other machines run as e.g. "aegis-mac-mini-2").
+ */
+export function systemOf(id: string, service?: string): DefenseSystem | undefined {
+  return DEFENSE_SYSTEMS[id] ?? (service ? DEFENSE_SYSTEMS[service] : undefined) ?? DEFENSE_SYSTEMS[id.split("-")[0]];
+}
+
+/** Display name for a node id (falls back to the raw id). */
+export function systemName(id: string, service?: string): string {
+  return systemOf(id, service)?.name ?? id;
+}
+
+/** The device suffix of a multi-device node id ("aegis-mac-mini-2" → "mac-mini-2"),
+ *  or undefined for a plain id. */
+export function deviceOf(id: string): string | undefined {
+  const key = Object.keys(DEFENSE_SYSTEMS).find((k) => id.startsWith(`${k}-`));
+  return key ? id.slice(key.length + 1) : undefined;
+}
+
+/** Name plus device when the id carries one: "AEGIS · azure-vm". Several
+ *  devices run the same systems, so the bare name would be ambiguous. */
+export function systemLabel(id: string, service?: string): string {
+  const dev = deviceOf(id);
+  return dev ? `${systemName(id, service)} · ${dev}` : systemName(id, service);
+}
+
 /** One-line tooltip text for a server site, or undefined if it's not a known system. */
-export function defenseTooltip(id: string): string | undefined {
-  const d = DEFENSE_SYSTEMS[id];
+export function defenseTooltip(id: string, service?: string): string | undefined {
+  const d = systemOf(id, service);
   if (!d) return undefined;
   return `${d.name} — ${d.layer}${d.leader ? ` (leader: ${d.leader})` : ""}\n${d.role}`;
 }

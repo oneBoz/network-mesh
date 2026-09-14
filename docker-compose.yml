@@ -15,6 +15,8 @@ services:
       PORT: "7070"
       MESH_KEY: ${MESH_KEY:-}
       EXTRA_LIGHTHOUSES: ${EXTRA_LIGHTHOUSES:-}
+      DEVICE_NAME: ${DEVICE_NAME:-local-device}
+      ADVERTISE: ${ADVERTISE:-}   # only when this host has a public IP and joins a lighthouse on itself
     ports:
       - "127.0.0.1:7070:7070"          # dashboard + control API, http://localhost:7070
       - "4001-4008:4001-4008/udp"      # node gossip ports  (lets peers on other machines reach these nodes)

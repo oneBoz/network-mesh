@@ -24,12 +24,12 @@ import { createSocket } from "node:dgram";
 import type { Socket } from "node:dgram";
 import { readFileSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
-import { tmpdir } from "node:os";
+import { hostname, tmpdir } from "node:os";
 import { join as joinPath } from "node:path";
 import { makeLogger, parseArgs } from "./cli.js";
 import { Membership } from "./swim.js";
-import type { Message, PeerInfo, Rumor, Skills, ThreatEvent, ThreatType } from "./protocol.js";
-import { decode, encode, observed } from "./protocol.js";
+import type { MeshMessage, Message, PeerInfo, Rumor, Skills, ThreatEvent, ThreatType } from "./protocol.js";
+import { decode, encode, observed, trimToFit } from "./protocol.js";
 import type { Assignment } from "./skills.js";
 import { matchmake, SKILL_TABLE, THREAT_TYPES, toAssignment } from "./skills.js";
 
@@ -40,16 +40,21 @@ const PORT = Number(args.port ?? 4001);
 const HTTP_PORT = Number(args.http ?? PORT + 4000);
 const SERVICE = args.service;
 const ADVERTISE = args.advertise && args.advertise !== "true" ? args.advertise : undefined;
+// Which machine we run on — shown by dashboards next to remote peers/messages.
+const DEVICE = args.device && args.device !== "true" ? args.device : hostname();
 const LIGHTHOUSES = (args.lighthouses ?? "").split(",").filter(Boolean).map((s) => {
   const [host, port] = s.split(":");
   return { host, port: Number(port) };
 });
 
-const PROTOCOL_PERIOD_MS = 1_000; // one probe per second (jittered ±10% to avoid lockstep)
-const ACK_TIMEOUT_MS = 500; // direct probe considered failed after this
+// Timers: loopback defaults, overridable per deployment via environment
+// (e.g. ACK_TIMEOUT_MS=1500 SUSPECT_TIMEOUT_MS=10000 for lossy internet paths).
+const envMs = (name: string, dflt: number) => { const v = Number(process.env[name]); return Number.isFinite(v) && v > 0 ? v : dflt; };
+const PROTOCOL_PERIOD_MS = envMs("PROTOCOL_PERIOD_MS", 1_000); // one probe per second (jittered ±10% to avoid lockstep)
+const ACK_TIMEOUT_MS = envMs("ACK_TIMEOUT_MS", 500); // direct probe considered failed after this
 const INDIRECT_PROBES = 2; // helpers asked to probe on our behalf after a direct timeout
-const INDIRECT_TIMEOUT_MS = 500; // extra wait for a relayed ack before suspecting
-const SUSPECT_TIMEOUT_MS = 5_000; // base suspect → dead window; scaled up with mesh size
+const INDIRECT_TIMEOUT_MS = envMs("INDIRECT_TIMEOUT_MS", 500); // extra wait for a relayed ack before suspecting
+const SUSPECT_TIMEOUT_MS = envMs("SUSPECT_TIMEOUT_MS", 5_000); // base suspect → dead window; scaled up with mesh size
 const DEAD_PRUNE_MS = 30_000; // forget dead peers after this (bounds view + packet size)
 const ANNOUNCE_INTERVAL_MS = 30_000; // keepalive to lighthouses; the reply doubles as an anti-entropy refresh
 const REJOIN_MS = 10_000; // re-query lighthouses if our whole view has emptied
@@ -84,6 +89,7 @@ const SKILLS = parseSkills(args.skills);
 
 const self: PeerInfo = {
   id: ID, host: ADVERTISE ?? "0.0.0.0", port: PORT, httpPort: HTTP_PORT, service: SERVICE, skills: SKILLS,
+  device: DEVICE,
   ...(ADVERTISE ? { advertise: ADVERTISE } : {}),
 };
 
@@ -156,10 +162,10 @@ function handleMessage(msg: Message, rinfo: { address: string; port: number }): 
       if (!node || typeof node.id !== "string" || !node.id || node.id === ID) return;
       const joiner: PeerInfo = observed(node, rinfo);
       membership.upsertPeer(joiner, true);
-      send(joiner, {
-        type: "join-ack", from: self,
-        peers: membership.allPeers().filter((p) => p.id !== joiner.id).slice(0, MAX_PIGGYBACK),
-      });
+      const peers = trimToFit(
+        sample(membership.allPeers().filter((p) => p.id !== joiner.id), MAX_PIGGYBACK),
+        (ps) => ({ type: "join-ack", from: self, peers: ps }), { fromBack: true });
+      send(joiner, { type: "join-ack", from: self, peers });
       log(`answered join from ${joiner.id} (peer-assisted)`);
       break;
     }
@@ -184,7 +190,7 @@ function handleMessage(msg: Message, rinfo: { address: string; port: number }): 
       membership.upsertPeer(msg.from, true);
       send(msg.from, {
         type: "ack", seq: msg.seq, from: self,
-        rumors: membership.rumors(MAX_PIGGYBACK), peers: piggybackPeers(),
+        ...gossipPayload(),
       });
       break;
     }
@@ -203,7 +209,7 @@ function handleMessage(msg: Message, rinfo: { address: string; port: number }): 
       setTimeout(() => pendingProxies.delete(s), ACK_TIMEOUT_MS + 100);
       send(target, {
         type: "ping", seq: s, from: self,
-        rumors: membership.rumors(MAX_PIGGYBACK), peers: piggybackPeers(),
+        ...gossipPayload(),
       });
       break;
     }
@@ -216,7 +222,7 @@ function handleMessage(msg: Message, rinfo: { address: string; port: number }): 
         pendingProxies.delete(msg.seq);
         send(proxy.origin, {
           type: "ack", seq: proxy.originSeq, from: msg.from, relayed: true,
-          rumors: membership.rumors(MAX_PIGGYBACK), peers: piggybackPeers(),
+          ...gossipPayload(),
         });
       }
       const pending = pendingAcks.get(msg.seq);
@@ -233,7 +239,96 @@ function handleMessage(msg: Message, rinfo: { address: string; port: number }): 
       handleThreat(msg.event, msg.ttl);
       break;
     }
+    case "msg": {
+      // Data channel: same rules as threat — application layer only.
+      ingestMessage(msg.msg, msg.ttl, msg.from?.id);
+      break;
+    }
   }
+}
+
+// ---------- message channel (application layer) ----------
+const MSG_FANOUT = 3; // remote (other-device) peers each node forwards a fresh message to
+const MSG_RELAYS = 2; // publicly advertised peers always included among the first hops
+const MSG_TTL = 4; // flood depth
+const MSG_SEEN_TTL_MS = 120_000; // dedupe window per message id
+const MAX_INBOX = 200;
+
+/** A message as stored by this node: the wire message plus what we did with it. */
+export interface StoredMessage extends MeshMessage {
+  receivedAt: number; // our clock
+  hop?: string; // peer we received it from (undefined = originated here)
+  /** For kind "gcs.signal": the actions this node decided on. Deterministic
+   *  matchmaking over the shared view means every node stores the same answer. */
+  assignment?: Assignment;
+}
+
+const seenMsgs = new Map<string, number>(); // id → first-seen ts
+const inbox: StoredMessage[] = [];
+
+function validMessage(m: unknown): m is MeshMessage {
+  const x = m as MeshMessage;
+  return !!x && typeof x.id === "string" && !!x.id && typeof x.kind === "string" && !!x.kind
+    && typeof x.at === "number" && !!x.from && typeof x.from.node === "string"
+    && (x.to === undefined || typeof x.to === "string")
+    && !!x.body && typeof x.body === "object";
+}
+
+/**
+ * Ingest a message: dedupe, act on it, store it, forward it.
+ * Forwarding: (1) every alive peer on this same device — loopback/LAN, free and
+ * reliable, so the local fleet always has it; (2) up to MSG_RELAYS peers that
+ * advertise a public address (a VPS node): reachable from every network, so a
+ * message crossing NATs takes the reliable hop first; (3) a random sample of
+ * the other remote peers, so hole-punched paths are used too.
+ */
+function ingestMessage(m: unknown, ttl: number, hop?: string): StoredMessage | null {
+  if (!validMessage(m)) return null;
+  if (seenMsgs.has(m.id)) return null;
+  seenMsgs.set(m.id, Date.now());
+
+  const mine = !m.to || m.to === ID;
+  let stored: StoredMessage | null = null;
+  if (mine) {
+    stored = { ...m, receivedAt: Date.now(), hop };
+    if (m.kind === "gcs.signal" && typeof m.body.threat === "string" && THREAT_TYPES.includes(m.body.threat as ThreatType)) {
+      stored.assignment = assignLocal({
+        threatId: m.id, threat: m.body.threat as ThreatType, at: m.at, origin: m.from.node,
+      });
+      const a = stored.assignment;
+      log(`\x1b[36mSIGNAL ${m.body.threat} from ${m.from.station ?? m.from.node}@${m.from.device ?? "?"} → primary=${a.primary ?? "NONE"} fallbacks=[${a.fallbacks.join(",")}]\x1b[0m`);
+    } else {
+      log(`\x1b[36mMSG ${m.kind} from ${m.from.station ?? m.from.node}@${m.from.device ?? "?"}${hop ? ` via ${hop}` : ""}\x1b[0m`);
+    }
+    inbox.push(stored);
+    if (inbox.length > MAX_INBOX) inbox.splice(0, inbox.length - MAX_INBOX);
+  }
+
+  if (ttl > 0) {
+    const alive = membership.alivePeers().filter((p) => p.id !== hop);
+    const local = alive.filter((p) => p.device === DEVICE);
+    const away = alive.filter((p) => p.device !== DEVICE);
+    const relays = sample(away.filter((p) => !!p.advertise), MSG_RELAYS);
+    const others = sample(away.filter((p) => !p.advertise), MSG_FANOUT);
+    // A unicast we can address directly always goes straight to its target too.
+    const direct = m.to ? alive.find((p) => p.id === m.to) : undefined;
+    const targets = new Map<string, PeerInfo>();
+    for (const p of [...local, ...relays, ...others, ...(direct ? [direct] : [])]) targets.set(p.id, p);
+    for (const p of targets.values()) send(p, { type: "msg", msg: m, ttl: ttl - 1, from: self });
+  }
+  return stored;
+}
+
+/** Originate a message from this node (HTTP POST /send). */
+function sendMessage(kind: string, body: Record<string, unknown>, to?: string, station?: string): StoredMessage | null {
+  const m: MeshMessage = {
+    id: `m-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+    at: Date.now(), kind, from: { node: ID, device: DEVICE, ...(station ? { station } : {}) },
+    ...(to ? { to } : {}), body,
+  };
+  const stored = ingestMessage(m, MSG_TTL);
+  // A unicast to someone else is not "ours": still report what we sent.
+  return stored ?? { ...m, receivedAt: Date.now() };
 }
 
 // ---------- threat matchmaking (application layer) ----------
@@ -306,6 +401,19 @@ function piggybackPeers(): PeerInfo[] {
   return all.slice(0, MAX_PIGGYBACK - 1).concat(self);
 }
 
+/** Rumors + peer addresses for one gossip packet, trimmed so the datagram never
+ *  fragments (see MAX_DATAGRAM): peers go first (they are big, ~200 B each; a
+ *  random sample still spreads every address over time), then rumors, and the
+ *  packet always keeps our own record so receivers learn where we are. */
+function gossipPayload(): { rumors: Rumor[]; peers: PeerInfo[] } {
+  const rumors = membership.rumors(MAX_PIGGYBACK);
+  const probe = (ps: PeerInfo[], rs: Rumor[]): Message =>
+    ({ type: "ping-req", seq: 2 ** 31, from: self, target: self, rumors: rs, peers: ps }); // the largest shape
+  const peers = trimToFit(piggybackPeers(), (ps) => probe(ps, rumors), { min: 1 }); // self is last → kept
+  const fitRumors = trimToFit(rumors, (rs) => probe(peers, rs), { fromBack: true });
+  return { rumors: fitRumors, peers };
+}
+
 function send(to: { host: string; port: number }, msg: Message): void {
   sock.send(encode(msg), to.port, to.host, (err) => {
     if (err) log(`\x1b[31msend to ${to.host}:${to.port} failed: ${err.message}\x1b[0m`);
@@ -364,6 +472,10 @@ function protocolTick(): void {
   for (const [id, ts] of seenThreats) {
     if (ts < threatCutoff) seenThreats.delete(id);
   }
+  const msgCutoff = Date.now() - MSG_SEEN_TTL_MS;
+  for (const [id, ts] of seenMsgs) {
+    if (ts < msgCutoff) seenMsgs.delete(id);
+  }
 
   // Resurrection probe: nobody normally pings the dead, so a false conviction
   // (e.g. both sides of a healed partition convicted each other) can never be
@@ -375,7 +487,7 @@ function protocolTick(): void {
       const d = dead[Math.floor(Math.random() * dead.length)];
       send(d, {
         type: "ping", seq: ++seq, from: self,
-        rumors: membership.rumors(MAX_PIGGYBACK), peers: piggybackPeers(),
+        ...gossipPayload(),
       });
     }
   }
@@ -397,7 +509,7 @@ function protocolTick(): void {
   const s = ++seq;
   send(target, {
     type: "ping", seq: s, from: self,
-    rumors: membership.rumors(MAX_PIGGYBACK), peers: piggybackPeers(),
+    ...gossipPayload(),
   });
   const timer = setTimeout(() => {
     // Direct probe failed. Before suspecting, ask a few peers to try their
@@ -408,11 +520,16 @@ function protocolTick(): void {
       membership.markSuspect(target.id);
       return;
     }
-    for (let k = 0; k < INDIRECT_PROBES && helpers.length; k++) {
-      const [h] = helpers.splice(Math.floor(Math.random() * helpers.length), 1);
+    // Ask the target's own neighbours first: peers on the same device share its
+    // LAN/NAT and can reach it even when our path through a NAT is filtered.
+    // Random helpers only fill the remaining slots — this is what keeps a node
+    // behind a home router from being falsely suspected by nodes on the internet.
+    const near = sample(helpers.filter((p) => !!target.device && p.device === target.device), INDIRECT_PROBES);
+    const far = sample(helpers.filter((p) => !(!!target.device && p.device === target.device)), INDIRECT_PROBES);
+    for (const h of [...near, ...far].slice(0, INDIRECT_PROBES)) {
       send(h, {
         type: "ping-req", seq: s, from: self, target,
-        rumors: membership.rumors(MAX_PIGGYBACK), peers: piggybackPeers(),
+        ...gossipPayload(),
       });
     }
     const indirectTimer = setTimeout(() => {
@@ -459,7 +576,38 @@ createServer((req, res) => {
   // just reached us at req.socket.localAddress, so report that for `self`.
   const selfHost = req.socket.localAddress?.replace(/^::ffff:/, "") ?? self.host;
   res.setHeader("content-type", "application/json");
-  if (url === "/threat" && req.method === "POST") {
+  if (url === "/send" && req.method === "POST") {
+    const chunks: Buffer[] = [];
+    req.on("data", (c: Buffer) => chunks.push(c));
+    req.on("end", () => {
+      try {
+        const body = JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}") as Record<string, unknown>;
+        if (typeof body.kind !== "string" || !body.kind) {
+          res.statusCode = 400;
+          res.end(JSON.stringify({ error: "kind (string) is required" }));
+          return;
+        }
+        const payload = body.body && typeof body.body === "object" ? body.body as Record<string, unknown> : {};
+        if (body.kind === "gcs.signal" && !THREAT_TYPES.includes(payload.threat as ThreatType)) {
+          res.statusCode = 400;
+          res.end(JSON.stringify({ error: `gcs.signal needs body.threat ∈ {${THREAT_TYPES.join(", ")}}` }));
+          return;
+        }
+        const stored = sendMessage(body.kind, payload,
+          typeof body.to === "string" && body.to ? body.to : undefined,
+          typeof body.station === "string" && body.station ? body.station : undefined);
+        res.end(JSON.stringify(stored, null, 2));
+      } catch {
+        res.statusCode = 400;
+        res.end(JSON.stringify({ error: "invalid JSON body" }));
+      }
+    });
+  } else if (url.startsWith("/inbox")) {
+    // GET /inbox?after=<receivedAt ms> → messages this node stored after that instant.
+    const q = new URL(url, "http://x").searchParams;
+    const after = Number(q.get("after") ?? 0);
+    res.end(JSON.stringify({ node: ID, device: DEVICE, messages: inbox.filter((m) => m.receivedAt > after) }));
+  } else if (url === "/threat" && req.method === "POST") {
     const chunks: Buffer[] = [];
     req.on("data", (c: Buffer) => chunks.push(c));
     req.on("end", () => {
@@ -489,7 +637,7 @@ createServer((req, res) => {
     res.end(JSON.stringify({ ok: true, id: ID }));
   } else {
     res.statusCode = 404;
-    res.end(JSON.stringify({ error: "try /members, /resolve/<service>, /engage/<threat>, POST /threat, /health" }));
+    res.end(JSON.stringify({ error: "try /members, /resolve/<service>, /engage/<threat>, POST /threat, POST /send, /inbox, /health" }));
   }
 }).on("error", (err) => {
   log(`http server error: ${err.message}`);
@@ -498,6 +646,6 @@ createServer((req, res) => {
 
 // ---------- boot ----------
 sock.bind(PORT, () => {
-  log(`up — udp/${PORT} gossip, http/${HTTP_PORT} queries, service=${SERVICE ?? "none"}${ADVERTISE ? `, advertising ${ADVERTISE}` : ""}${process.env.MESH_KEY ? ", HMAC ON" : ""}`);
+  log(`up — udp/${PORT} gossip, http/${HTTP_PORT} queries, service=${SERVICE ?? "none"}, device=${DEVICE}${ADVERTISE ? `, advertising ${ADVERTISE}` : ""}${process.env.MESH_KEY ? ", HMAC ON" : ""}`);
   tryJoin();
 });

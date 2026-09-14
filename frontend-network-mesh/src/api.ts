@@ -1,4 +1,4 @@
-import type { LogEvent, MeshState, ThreatAssignmentEvent, ThreatType } from "./types";
+import type { InboxMessage, LogEvent, MeshState, ThreatAssignmentEvent, ThreatType } from "./types";
 
 async function post(path: string, body?: unknown): Promise<unknown> {
   const r = await fetch(path, {
@@ -26,6 +26,10 @@ export const api = {
       throw new Error(data.error ?? `${r.status} ${r.statusText}`);
     }
   },
+  /** GCS signal: a data-channel message flooded to every device; each node
+   *  matchmakes it and the answer comes back with the stored message. */
+  sendSignal: (threat: ThreatType, station: string, note?: string) =>
+    post("/api/signal", { threat, station, note: note || undefined }) as Promise<InboxMessage & { via: string }>,
   injectThreat: (threat: ThreatType, via?: string) =>
     post("/api/threat", { threat, via: via || undefined }) as Promise<ThreatAssignmentEvent>,
   resolve: async (service: string, via?: string): Promise<unknown> => {
@@ -46,7 +50,8 @@ export function subscribe(
   onState: (s: MeshState) => void,
   onLog: (e: LogEvent) => void,
   onConnected?: (up: boolean) => void,
-  onThreat?: (t: ThreatAssignmentEvent) => void
+  onThreat?: (t: ThreatAssignmentEvent) => void,
+  onMessage?: (m: InboxMessage) => void
 ): () => void {
   const es = new EventSource("/api/events");
   es.addEventListener("state", (e) => {
@@ -55,6 +60,7 @@ export function subscribe(
   });
   es.addEventListener("log", (e) => onLog(JSON.parse((e as MessageEvent).data)));
   es.addEventListener("threat", (e) => onThreat?.(JSON.parse((e as MessageEvent).data)));
+  es.addEventListener("message", (e) => onMessage?.(JSON.parse((e as MessageEvent).data)));
   es.onerror = () => onConnected?.(false);
   return () => es.close();
 }

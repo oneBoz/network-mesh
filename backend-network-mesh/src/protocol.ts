@@ -49,6 +49,25 @@ export interface PeerInfo {
    *  as 127.0.0.1 and handed out as such to the whole internet. `advertise`
    *  overrides the observed host (and keeps the node's own bind port). */
   advertise?: string;
+  /** Human-readable name of the machine this node runs on (--device, default
+   *  hostname). Purely informational: lets dashboards say WHERE a peer is. */
+  device?: string;
+}
+
+/**
+ * Application-level message carried over the mesh (the "data channel").
+ * Flooded with a TTL and deduped by id like threat events; every node keeps
+ * the ones addressed to it (or broadcast) in a small inbox. `kind` is free-form;
+ * "gcs.signal" is special-cased: each node runs threat matchmaking on it so
+ * every device shows the identical actions without any coordination.
+ */
+export interface MeshMessage {
+  id: string;
+  at: number; // sender's clock, ms epoch
+  kind: string; // e.g. "gcs.signal", "chat"
+  from: { node: string; device?: string; station?: string };
+  to?: string; // node id for unicast; omitted = broadcast to every member
+  body: Record<string, unknown>;
 }
 
 /** A membership rumor: "node <id> is <status>, as of incarnation <inc>". */
@@ -72,7 +91,30 @@ export type Message =
   | { type: "ack"; seq: number; from: PeerInfo; relayed?: boolean; rumors: Rumor[]; peers: PeerInfo[] }
   // Application-level threat flood (TTL + dedupe-by-threatId). Deliberately
   // carries no rumors/peers piggyback and never touches membership state.
-  | { type: "threat"; event: ThreatEvent; ttl: number; from: PeerInfo };
+  | { type: "threat"; event: ThreatEvent; ttl: number; from: PeerInfo }
+  // Application data channel (TTL + dedupe-by-id). Never touches membership.
+  | { type: "msg"; msg: MeshMessage; ttl: number; from: PeerInfo };
+
+/**
+ * Hard cap on an encoded datagram. Anything over the path MTU (~1472 bytes of
+ * UDP payload on the internet, less inside tunnels) is IP-fragmented, and many
+ * NATs and cloud networks silently drop fragments — on loopback everything
+ * works, on the real internet every probe fails. Gossip is incremental, so
+ * shipping fewer peers/rumors per packet costs only a little convergence time.
+ */
+export const MAX_DATAGRAM = 1_200;
+
+/** Drop items from `items` (from the front, or from the back when `fromBack`)
+ *  until the message `build` makes from them encodes under MAX_DATAGRAM. Always
+ *  keeps at least `min` items. */
+export function trimToFit<T>(items: T[], build: (items: T[]) => Message, opts: { min?: number; fromBack?: boolean } = {}): T[] {
+  const min = opts.min ?? 0;
+  const arr = items.slice();
+  while (arr.length > min && encode(build(arr)).length > MAX_DATAGRAM) {
+    if (opts.fromBack) arr.pop(); else arr.shift();
+  }
+  return arr;
+}
 
 const KEY = process.env.MESH_KEY ?? "";
 const REPLAY_WINDOW_MS = 60_000; // signed frames older (or more future-dated) than this are dropped

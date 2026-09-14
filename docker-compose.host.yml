@@ -1,0 +1,19 @@
+# Override for running the FULL dashboard on a Linux host with a public IP
+# (e.g. the VPS), making that host a complete second "device" with its own
+# Command and GCS screens. Host networking gives its nodes real source
+# addresses; ADVERTISE tells the lighthouses on this same host how the internet
+# reaches those nodes (they join over loopback, which would otherwise be
+# recorded as 127.0.0.1). Open UDP 4001-4010 and 5001-5003 in the firewall.
+#
+#   ADVERTISE=<public ip> DEVICE_NAME=vps \
+#     docker compose -p mesh-dashboard -f docker-compose.yml -f docker-compose.host.yml up -d --build
+#
+# The dashboard stays on loopback; reach it through an SSH tunnel:
+#   ssh -L 7070:127.0.0.1:7070 user@<public ip>   →   http://localhost:7070
+# Other devices join with EXTRA_LIGHTHOUSES=<public ip>:5001.
+services:
+  mesh:
+    network_mode: host
+    ports: !reset []
+    environment:
+      HOST: 127.0.0.1

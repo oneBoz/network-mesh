@@ -53,6 +53,8 @@ Environment knobs, all optional:
 | `MESH_KEY` | unset | Shared HMAC secret passed to every child; unsigned packets are dropped when set |
 | `EXTRA_LIGHTHOUSES` | unset | `host:port,...` of lighthouses on other machines; every spawned node joins them too (this is how one dashboard's fleet merges with peers across the internet) |
 | `HOST` / `PORT` | `127.0.0.1` / `7070` | Bind address of the control API. Only Docker sets `HOST=0.0.0.0`; the compose port mapping is loopback-only on the host |
+| `DEVICE_NAME` | hostname | Passed to every node as `--device`; also suffixes demo node ids (`aegis-<device>`) whenever the fleet joins external lighthouses or advertises, so several devices can boot the demo into one mesh |
+| `ADVERTISE` | unset | Public host of this machine, passed to every node as `--advertise` (dashboard running on a VPS) |
 | `FRONTEND_DIST` | `../frontend-network-mesh/dist` | Where to serve the dashboard build from |
 
 Then start the frontend dev server from the **frontend-network-mesh** repo
@@ -77,6 +79,10 @@ http://127.0.0.1:7070 — by default from a sibling checkout at
     POST   /api/procs/<name>/start     revive a crashed process
     DELETE /api/procs/<name>           kill + forget
     GET    /api/resolve/<svc>?via=<id> service discovery through a live node
+    POST   /api/signal                 {threat, station?, note?, via?} → GCS signal:
+                                       flooded to every device as a data-channel
+                                       message; returns the stored message with the
+                                       originating node's assignment
     POST   /api/threat                 {threat, via?} → inject a threat through a
                                        node; returns the mesh's ranked assignment
                                        and broadcasts it as an SSE `threat` event
@@ -84,6 +90,12 @@ http://127.0.0.1:7070 — by default from a sibling checkout at
 The shapes returned by this API are defined in `backend/src/types.ts` — the
 frontend repo keeps a mirror in `src/types.ts`; update both when the contract
 changes.
+
+`MeshState` also carries `remotes` and `extraLighthouses`: members that show
+up in the local nodes' views but are not processes of this dashboard (nodes on
+other machines that joined through a shared lighthouse). They are derived from
+gossip alone — the poller never contacts another machine — with a status that
+is the majority opinion of the local observers, ties broken pessimistically.
 
 ## Run a mesh by hand
 
@@ -136,6 +148,26 @@ assignment. Escalation is emergent: SWIM convicts the primary, the alive
 filter drops it, the next matchmake returns the fallback.
 
     curl -s -X POST localhost:8001/threat -d '{"threat":"missile"}'   # primary: aegis, fallbacks: smartfalcon → edgefuse
+
+## Data channel — messages between devices
+
+Any node can originate an application message that is flooded to every member
+(TTL + dedupe by id, membership untouched). Forwarding sends to **publicly
+advertised peers first** (relays such as a VPS node), then a random sample, so
+a message crossing NATs always takes the reliable hop. Each node keeps the
+messages addressed to it (or broadcast) in a bounded inbox.
+
+    curl -s -X POST localhost:8001/send -H 'content-type: application/json' \
+      -d '{"kind":"gcs.signal","station":"GCS-Alpha","body":{"threat":"swarm","note":"bearing 045"}}'
+    curl -s localhost:8004/inbox                 # every node has it, with the SAME assignment
+    curl -s -X POST localhost:8001/send -d '{"kind":"chat","to":"wisl","body":{"text":"hello"}}'
+
+`kind: "gcs.signal"` is special: each receiving node runs threat matchmaking on
+`body.threat` and stores the assignment next to the message, so a Ground
+Control Station's report produces identical "actions taken" on every device
+without any coordination. Other kinds are stored as-is (`to` makes a message
+unicast; everyone else only forwards it). Nodes carry a `--device <name>`
+label (default hostname) that rides along in `from.device`.
     curl -s localhost:8005/engage/missile   # ask wisl instead — IDENTICAL answer
     curl -s localhost:8001/engage/emp       # wisl (cheap jamming beats Layer-1 missiles)
 
@@ -170,7 +202,9 @@ filter drops it, the next matchmake returns the fallback.
 - **Anti-entropy via announce.** Lighthouses answer the 30s keepalive with a peer-list refresh, so nodes that pruned each other during a partition re-learn the far side's addresses automatically.
 - **Peer-assisted join.** Any mesh node answers `join` like a lighthouse. Combined with the peer list each node saves to the OS temp dir every 30s, a restarted node rejoins even with every lighthouse down.
 - **Adaptive suspicion + jitter.** The suspect→dead window scales with view size (~log n, like memberlist) so refutations have time to spread in bigger meshes, and all timers carry ±10% jitter to avoid lockstep probe bursts.
-- **Bounded packets.** Rumors and peer addresses are capped per message (least-gossiped-first), keeping datagrams under the MTU as the mesh grows.
+- **Bounded packets.** Every datagram is trimmed to 1200 bytes (`MAX_DATAGRAM`): piggybacked peer records go first, then rumors, and lighthouse join-acks are cut the same way. This is not cosmetic — a 10-node view makes a ~2.2 KB ping, which is IP-fragmented on the internet, and NATs and cloud networks drop fragments. Loopback hides the problem completely; two devices behind different NATs showed a false suspicion every few seconds until the cap went in.
+- **Device-aware indirect probes.** When a direct probe times out, the helpers asked to probe on our behalf are chosen from the target's own device first (they share its LAN/NAT), then at random.
+- **Timer overrides.** `PROTOCOL_PERIOD_MS`, `ACK_TIMEOUT_MS`, `INDIRECT_TIMEOUT_MS`, `SUSPECT_TIMEOUT_MS` environment variables override the loopback defaults for lossy paths.
 - **Visible drops.** With `MESH_KEY` set, rejected frames log *why* (key mismatch, clock skew) instead of silently impersonating a dead peer.
 - **Duplicate-ID guard.** A lighthouse refuses a join for an id that is actively registered from a different address — two machines can't fight an incarnation war over one identity.
 

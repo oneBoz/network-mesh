@@ -15,7 +15,7 @@
 import { createSocket } from "node:dgram";
 import { makeLogger, parseArgs } from "./cli.js";
 import type { PeerInfo } from "./protocol.js";
-import { decode, encode, observed } from "./protocol.js";
+import { decode, encode, observed, trimToFit } from "./protocol.js";
 
 const args = parseArgs(process.argv.slice(2));
 const PORT = Number(args.port ?? 5001);
@@ -83,7 +83,10 @@ sock.on("message", (buf, rinfo) => {
     // partition heals, each half re-learns the other's addresses within one
     // announce interval and gossip re-merges the views — without this, two
     // halves that convicted each other never exchange a packet again.
-    const peers = sample(freshPeers().filter((p) => p.id !== info.id), MAX_ACK_PEERS);
+    // Sampled, then trimmed to one unfragmented datagram: the joiner learns the
+    // rest through gossip and the next announce refresh.
+    const peers = trimToFit(sample(freshPeers().filter((p) => p.id !== info.id), MAX_ACK_PEERS),
+      (ps) => ({ type: "join-ack", peers: ps }), { fromBack: true });
     sock.send(encode({ type: "join-ack", peers }), rinfo.port, rinfo.address, (err) => {
       if (err) log(`join-ack to ${rinfo.address}:${rinfo.port} failed: ${err.message}`);
     });

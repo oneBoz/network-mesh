@@ -55,11 +55,63 @@ export interface NodeView {
   view: Record<string, ViewEntry>;
 }
 
+/** A mesh member that is NOT a process of this dashboard: a node on another
+ *  machine, learned purely through gossip (it shows up in the local nodes'
+ *  /members views). Nothing here is polled over the internet; status is the
+ *  consensus of the local observers, exactly like the topology colouring. */
+export interface RemoteMember {
+  id: string;
+  host: string; // address the local nodes reach it at (public IP or advertised host)
+  port: number;
+  httpPort?: number;
+  service?: string;
+  skills?: Skills;
+  status: NodeStatus; // majority across local reachable observers, ties pessimistic
+  inc: number;
+  since: number; // earliest `since` any local observer reports
+  observers: number; // local nodes that currently hold an entry for it
+  votes: Record<NodeStatus, number>;
+}
+
+/** The mesh's ranked answer to a threat, as computed by a node. */
+export interface Assignment {
+  threatId: string;
+  threat: ThreatType;
+  primary?: string;
+  fallbacks: string[];
+  ranked: { id: string; service?: string; layer: number; cost: number }[];
+}
+
+/**
+ * A data-channel message as reported by the local nodes' /inbox APIs, merged
+ * by id across every local node that received it. Kind "gcs.signal" carries a
+ * threat report from a Ground Control Station; each node ran matchmaking on it
+ * and `assignment` is what they decided (identical everywhere by construction —
+ * `consistent` says whether the local nodes actually agreed).
+ */
+export interface InboxMessage {
+  id: string;
+  at: number; // sender's clock
+  kind: string;
+  from: { node: string; device?: string; station?: string };
+  to?: string;
+  body: Record<string, unknown>; // gcs.signal: { threat, note?, pos? }
+  assignment?: Assignment;
+  receivedAt: number; // first local receipt
+  seenBy: string[]; // local nodes that reported it
+  agree: number; // of those, how many computed the same assignment as the first report
+  consistent: boolean; // agree === seenBy.length
+}
+
 export interface MeshState {
   ts: number;
+  device: string; // name of the machine this dashboard runs on (DEVICE_NAME)
   procs: ProcState[];
   views: NodeView[];
   threats: ThreatAssignmentEvent[]; // most recent last, capped
+  remotes: RemoteMember[]; // members on other machines, derived from views
+  extraLighthouses: string[]; // host:port of lighthouses on other machines (EXTRA_LIGHTHOUSES)
+  messages: InboxMessage[]; // data-channel messages, most recent last, capped
 }
 
 export interface LogEvent {

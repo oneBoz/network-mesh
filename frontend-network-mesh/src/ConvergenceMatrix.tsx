@@ -7,10 +7,20 @@ const LETTER = { alive: "A", suspect: "S", dead: "D" } as const;
  * other node, straight from each node's own /members API. When all columns
  * agree the mesh has converged; after a kill or partition you can watch
  * disagreement spread and then heal.
+ *
+ * Remote members (nodes on other machines, learned via gossip) are extra
+ * columns: local observers have an opinion about them, but they are not
+ * observers themselves because the dashboard never polls another machine.
  */
 export function ConvergenceMatrix({ state }: { state: MeshState }) {
   const nodeIds = state.procs.filter((p) => p.kind === "node").map((p) => p.name);
-  if (nodeIds.length === 0) return null;
+  const remotes = state.remotes;
+  if (nodeIds.length === 0 && remotes.length === 0) return null;
+
+  const subjects = [
+    ...nodeIds.map((id) => ({ id, remote: undefined as string | undefined })),
+    ...remotes.map((r) => ({ id: r.id, remote: `${r.host}:${r.port}` })),
+  ];
 
   return (
     <div style={{ overflowX: "auto" }}>
@@ -18,14 +28,19 @@ export function ConvergenceMatrix({ state }: { state: MeshState }) {
         <thead>
           <tr>
             <th style={{ textAlign: "left" }}>sees →</th>
-            {nodeIds.map((id) => <th key={id}>{id}</th>)}
+            {subjects.map((s) => (
+              <th key={s.id} className={s.remote ? "remote-col" : undefined}
+                title={s.remote ? `remote member on another machine · ${s.remote}` : undefined}>
+                {s.id}{s.remote ? " ⟡" : ""}
+              </th>
+            ))}
           </tr>
         </thead>
         <tbody>
           {state.views.map((v) => (
             <tr key={v.id} className={v.reachable ? "" : "observer-down"}>
               <th style={{ textAlign: "left" }}>{v.id}</th>
-              {nodeIds.map((subject) => {
+              {subjects.map(({ id: subject }) => {
                 if (subject === v.id) {
                   return (
                     <td key={subject}>
@@ -52,6 +67,11 @@ export function ConvergenceMatrix({ state }: { state: MeshState }) {
           ))}
         </tbody>
       </table>
+      {remotes.length > 0 && (
+        <div style={{ color: "var(--muted)", fontSize: 11, marginTop: 6 }}>
+          ⟡ remote member on another machine — rows are local observers only; the dashboard never polls across the internet.
+        </div>
+      )}
     </div>
   );
 }

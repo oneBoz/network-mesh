@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { api } from "./api";
 import type { MeshState, ThreatAssignmentEvent, ThreatType } from "./types";
-import { DEFENSE_SYSTEMS } from "./defense";
+import { systemLabel } from "./defense";
 
 const THREATS: { type: ThreatType; icon: string }[] = [
   { type: "missile", icon: "🚀" },
@@ -10,7 +10,7 @@ const THREATS: { type: ThreatType; icon: string }[] = [
   { type: "emp", icon: "⚡" },
 ];
 
-const sysName = (id: string) => DEFENSE_SYSTEMS[id]?.name ?? id;
+const sysName = systemLabel;
 
 /**
  * Threat injection: hit any node's /threat endpoint via the control plane and

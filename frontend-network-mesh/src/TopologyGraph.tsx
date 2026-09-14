@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
-import type { MeshState, NodeStatus, ThreatAssignmentEvent } from "./types";
+import type { MeshState, NodeStatus, RemoteMember, ThreatAssignmentEvent } from "./types";
 import { consensus } from "./consensus";
-import { DEFENSE_SYSTEMS, defenseTooltip } from "./defense";
+import { defenseTooltip, systemOf } from "./defense";
 
 const COLOR: Record<NodeStatus | "unknown", string> = {
   alive: "var(--alive)",
@@ -104,24 +104,51 @@ export function TopologyGraph({
 
   const lighthouses = state.procs.filter((p) => p.kind === "lighthouse");
   const nodes = state.procs.filter((p) => p.kind === "node");
+  // Members on other machines (learned via gossip) and the external lighthouses
+  // they were reached through. Drawn as first-class glyphs, but read-only.
+  const remotes = state.remotes;
+  const extraLh = state.extraLighthouses;
+  const xlhId = (addr: string) => `xlh:${addr}`;
+  const remoteIds = new Set(remotes.map((r) => r.id));
 
   // Defaults for anything never dragged: lighthouses in a top row, nodes on a
   // circle. Dragged glyphs are pinned by the `pos` state instead.
   const defaults = new Map<string, XY>();
+  const lhSlots = lighthouses.length + extraLh.length;
   lighthouses.forEach((p, i) =>
-    defaults.set(p.name, { x: ((i + 1) * W) / (lighthouses.length + 1), y: 52 })
+    defaults.set(p.name, { x: ((i + 1) * W) / (lhSlots + 1), y: 52 })
   );
-  const cx = W / 2, cy = 310, r = Math.min(185, 60 + nodes.length * 22);
+  extraLh.forEach((addr, j) =>
+    defaults.set(xlhId(addr), { x: ((lighthouses.length + j + 1) * W) / (lhSlots + 1), y: 52 })
+  );
+  // Local nodes on a circle, shifted left when remotes occupy the right column.
+  const cx = remotes.length ? W / 2 - 70 : W / 2, cy = 310, r = Math.min(185, 60 + nodes.length * 22);
   nodes.forEach((p, i) => {
     const a = (2 * Math.PI * i) / nodes.length - Math.PI / 2;
     defaults.set(p.name, { x: cx + r * Math.cos(a), y: cy + r * Math.sin(a) });
   });
+  // Remotes in a right-hand column; more than four zig-zag over two columns so
+  // their three-line labels do not overlap.
+  remotes.forEach((m, j) => {
+    const span = H - 200;
+    const twoCols = remotes.length > 4;
+    defaults.set(m.id, {
+      x: twoCols ? (j % 2 ? W - 60 : W - 150) : W - 75,
+      y: 120 + ((j + 0.5) * span) / remotes.length,
+    });
+  });
 
   const getPos = (name: string): XY => pos[name] ?? defaults.get(name) ?? { x: cx, y: cy };
 
-  const procNames = new Set(state.procs.map((p) => p.name));
+  const procNames = new Set([...state.procs.map((p) => p.name), ...remotes.map((m) => m.id)]);
+  // Default router links name services ("aegis"); a fleet joined to other
+  // machines runs as "aegis-<device>", so resolve link endpoints by service too.
+  const byService = new Map<string, string>();
+  for (const p of nodes) if (p.service && !byService.has(p.service)) byService.set(p.service, p.name);
+  const resolveEnd = (n: string) => (procNames.has(n) ? n : byService.get(n));
   const routers = links
-    .filter(([a, b]) => procNames.has(a) && procNames.has(b))
+    .map(([a, b]) => [resolveEnd(a), resolveEnd(b)] as [string | undefined, string | undefined])
+    .filter((l): l is Link => !!l[0] && !!l[1] && l[0] !== l[1])
     .map(([a, b]) => {
       const id = routerId(a, b);
       const pa = getPos(a), pb = getPos(b);
@@ -196,16 +223,78 @@ export function TopologyGraph({
   for (const v of state.views) {
     if (!v.reachable || !nodeNames.has(v.id)) continue;
     for (const [peer, entry] of Object.entries(v.view)) {
-      if (entry.status !== "alive" || !nodeNames.has(peer)) continue;
+      if (entry.status !== "alive" || (!nodeNames.has(peer) && !remoteIds.has(peer))) continue;
       const key = v.id < peer ? `${v.id} ${peer}` : `${peer} ${v.id}`;
       if (!edgeMap.has(key)) edgeMap.set(key, { from: v.id, to: peer });
     }
   }
   const edges = [...edgeMap.values()];
 
-  if (!state.procs.length) {
+  if (!state.procs.length && !remotes.length) {
     return <div className="empty">No processes yet — boot the demo mesh or add servers.</div>;
   }
+
+  // One glyph renderer for local and remote nodes: colour is mesh consensus in
+  // both cases (consensus() walks the local views, which hold remote entries too).
+  const nodeGlyph = (id: string, service: string | undefined, running: boolean, remote?: RemoteMember) => {
+    const at = getPos(id);
+    const belief = consensus(state, id);
+    const isPrimary = activeThreat?.primary === id;
+    const fallbackRank = activeThreat ? activeThreat.fallbacks.indexOf(id) : -1;
+    const sys = systemOf(id, service);
+    return (
+      <g key={id} transform={`translate(${at.x},${at.y})`}
+        {...dragProps(id, at, () => clickGlyph(id))}>
+        <title>
+          {(defenseTooltip(id, service) ?? id) + (remote
+            ? `\nREMOTE — on another machine, reached over the internet at ${remote.host}:${remote.port}\nbelief: ${remote.status} (${remote.observers} local observers)`
+            : "")}
+        </title>
+        {linkFrom === id && (
+          <circle r={30} fill="none" stroke="var(--accent, #3E9BFF)" strokeWidth={2} strokeDasharray="3 3" />
+        )}
+        {isPrimary && (
+          <>
+            <circle className="threat-ring" r={27} fill="none"
+              stroke="var(--suspect)" strokeWidth={2.5} />
+            <text y={-33} textAnchor="middle" fill="var(--suspect)" fontSize={11} fontWeight={700}>
+              ⚑ {activeThreat!.threat}
+            </text>
+          </>
+        )}
+        {fallbackRank >= 0 && (
+          <>
+            <circle r={25} fill="none" stroke="var(--suspect)" strokeOpacity={0.45}
+              strokeWidth={1.5} strokeDasharray="5 4" />
+            <text x={20} y={-20} textAnchor="middle" fill="var(--suspect)"
+              fillOpacity={0.8} fontSize={10} fontWeight={700}>
+              {fallbackRank + 2}
+            </text>
+          </>
+        )}
+        {!running && (
+          <circle r={26} fill="none" stroke="var(--dead)" strokeWidth={2} strokeDasharray="4 4" />
+        )}
+        {remote && (
+          <circle r={26} fill="none" stroke="var(--accent)" strokeOpacity={0.7} strokeWidth={1.5} strokeDasharray="2 4" />
+        )}
+        <circle r={19} fill={COLOR[belief]} fillOpacity={0.22}
+          stroke={COLOR[belief]} strokeWidth={2.5} />
+        <text textAnchor="middle" dy={4} fill="var(--text)"
+          fontSize={sys ? 9 : id.length > 6 ? 9 : 12} fontWeight={700}>
+          {sys?.short ?? id}
+        </text>
+        <text y={36} textAnchor="middle" fill="var(--muted)" fontSize={11}>
+          {sys?.layer ?? service ?? ""}
+        </text>
+        {remote && (
+          <text y={48} textAnchor="middle" fill="var(--accent)" fontSize={9.5}>
+            ⟡ {remote.host}
+          </text>
+        )}
+      </g>
+    );
+  };
 
   return (
     <>
@@ -218,7 +307,7 @@ export function TopologyGraph({
         <span style={{ color: "var(--muted)", fontSize: 12 }}>
           {linkMode
             ? linkFrom
-              ? `linking from ${DEFENSE_SYSTEMS[linkFrom]?.name ?? linkFrom} — click the other endpoint (esc cancels)`
+              ? `linking from ${systemOf(linkFrom)?.name ?? linkFrom} — click the other endpoint (esc cancels)`
               : "click the two glyphs to join through a router (esc cancels)"
             : "drag to rearrange · click a router to remove it"}
         </span>
@@ -240,9 +329,29 @@ export function TopologyGraph({
 
         {edges.map((e, i) => {
           const a = getPos(e.from), b = getPos(e.to);
-          return (
+          const wan = remoteIds.has(e.from) || remoteIds.has(e.to);
+          return wan ? (
+            <line key={i} x1={a.x} y1={a.y} x2={b.x} y2={b.y}
+              stroke="var(--accent)" strokeOpacity={0.3} strokeWidth={1.5} strokeDasharray="3 5" />
+          ) : (
             <line key={i} x1={a.x} y1={a.y} x2={b.x} y2={b.y}
               stroke="var(--alive)" strokeOpacity={0.12} strokeWidth={1.5} />
+          );
+        })}
+
+        {/* External lighthouses: join brokers on other machines (EXTRA_LIGHTHOUSES) */}
+        {extraLh.map((addr) => {
+          const id = xlhId(addr);
+          const at = getPos(id);
+          return (
+            <g key={id} transform={`translate(${at.x},${at.y})`} {...dragProps(id, at)}>
+              <title>{`External lighthouse at ${addr}\nEvery local node joins it too — this is how the fleet meets peers on other networks`}</title>
+              <rect x={-13} y={-13} width={26} height={26} rx={5}
+                transform="rotate(45)" fill="none" stroke="var(--lh)" strokeWidth={2.5} strokeDasharray="4 3" />
+              <circle r={4} fill="var(--lh)" />
+              <text y={-24} textAnchor="middle" fill="var(--accent)" fontSize={9} fontWeight={700}>⟡ INTERNET</text>
+              <text y={32} textAnchor="middle" fill="var(--muted)" fontSize={10}>{addr}</text>
+            </g>
           );
         })}
 
@@ -280,52 +389,8 @@ export function TopologyGraph({
           );
         })}
 
-        {nodes.map((p) => {
-          const at = getPos(p.name);
-          const belief = consensus(state, p.name);
-          const isPrimary = activeThreat?.primary === p.name;
-          const fallbackRank = activeThreat ? activeThreat.fallbacks.indexOf(p.name) : -1;
-          return (
-            <g key={p.name} transform={`translate(${at.x},${at.y})`}
-              {...dragProps(p.name, at, () => clickGlyph(p.name))}>
-              {defenseTooltip(p.name) && <title>{defenseTooltip(p.name)}</title>}
-              {linkFrom === p.name && (
-                <circle r={30} fill="none" stroke="var(--accent, #3E9BFF)" strokeWidth={2} strokeDasharray="3 3" />
-              )}
-              {isPrimary && (
-                <>
-                  <circle className="threat-ring" r={27} fill="none"
-                    stroke="var(--suspect)" strokeWidth={2.5} />
-                  <text y={-33} textAnchor="middle" fill="var(--suspect)" fontSize={11} fontWeight={700}>
-                    ⚑ {activeThreat!.threat}
-                  </text>
-                </>
-              )}
-              {fallbackRank >= 0 && (
-                <>
-                  <circle r={25} fill="none" stroke="var(--suspect)" strokeOpacity={0.45}
-                    strokeWidth={1.5} strokeDasharray="5 4" />
-                  <text x={20} y={-20} textAnchor="middle" fill="var(--suspect)"
-                    fillOpacity={0.8} fontSize={10} fontWeight={700}>
-                    {fallbackRank + 2}
-                  </text>
-                </>
-              )}
-              {!p.running && (
-                <circle r={26} fill="none" stroke="var(--dead)" strokeWidth={2} strokeDasharray="4 4" />
-              )}
-              <circle r={19} fill={COLOR[belief]} fillOpacity={0.22}
-                stroke={COLOR[belief]} strokeWidth={2.5} />
-              <text textAnchor="middle" dy={4} fill="var(--text)"
-                fontSize={DEFENSE_SYSTEMS[p.name] ? 9 : 12} fontWeight={700}>
-                {DEFENSE_SYSTEMS[p.name]?.short ?? p.name}
-              </text>
-              <text y={36} textAnchor="middle" fill="var(--muted)" fontSize={11}>
-                {DEFENSE_SYSTEMS[p.name]?.layer ?? p.service ?? ""}
-              </text>
-            </g>
-          );
-        })}
+        {nodes.map((p) => nodeGlyph(p.name, p.service, p.running))}
+        {remotes.map((m) => nodeGlyph(m.id, m.service, true, m))}
 
         <g transform={`translate(14,${H - 14})`} fontSize={11} fill="var(--muted)">
           <circle cx={4} r={5} fill="var(--alive)" fillOpacity={0.4} stroke="var(--alive)" />
@@ -341,6 +406,12 @@ export function TopologyGraph({
           <text x={438} dy={4}>via commercial router</text>
           <circle cx={575} r={7} fill="none" stroke="var(--suspect)" strokeWidth={2} />
           <text x={588} dy={4}>engaging threat</text>
+          {(remotes.length > 0 || extraLh.length > 0) && (
+            <>
+              <circle cx={695} r={7} fill="none" stroke="var(--accent)" strokeDasharray="2 3" />
+              <text x={707} dy={4}>other device</text>
+            </>
+          )}
         </g>
       </svg>
     </>
