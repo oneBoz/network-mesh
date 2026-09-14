@@ -47,14 +47,26 @@ const LIGHTHOUSES = (args.lighthouses ?? "").split(",").filter(Boolean).map((s) 
   return { host, port: Number(port) };
 });
 
-// Timers: loopback defaults, overridable per deployment via environment
-// (e.g. ACK_TIMEOUT_MS=1500 SUSPECT_TIMEOUT_MS=10000 for lossy internet paths).
+// Timers. MESH_PROFILE picks a preset; any individual *_MS variable overrides it.
+//   local    — loopback / LAN demo (default)
+//   internet — home broadband behind NAT, tens of ms RTT
+//   mobile   — phone hotspot / carrier NAT: 100-300 ms RTT with jitter, UDP
+//              mappings that idle out in ~30 s, so faster keepalives and
+//              longer patience before suspecting anyone
+type Profile = { ack: number; indirect: number; suspect: number; keepalive: number };
+const PROFILES: Record<string, Profile> = {
+  local: { ack: 600, indirect: 1_000, suspect: 5_000, keepalive: 8_000 },
+  internet: { ack: 800, indirect: 1_200, suspect: 8_000, keepalive: 8_000 },
+  mobile: { ack: 1_000, indirect: 1_500, suspect: 10_000, keepalive: 5_000 },
+};
+const PROFILE_NAME = process.env.MESH_PROFILE && PROFILES[process.env.MESH_PROFILE] ? process.env.MESH_PROFILE : "local";
+const PROFILE = PROFILES[PROFILE_NAME];
 const envMs = (name: string, dflt: number) => { const v = Number(process.env[name]); return Number.isFinite(v) && v > 0 ? v : dflt; };
 const PROTOCOL_PERIOD_MS = envMs("PROTOCOL_PERIOD_MS", 1_000); // one probe per second (jittered ±10% to avoid lockstep)
-const ACK_TIMEOUT_MS = envMs("ACK_TIMEOUT_MS", 600); // direct probe considered failed after this
+const ACK_TIMEOUT_MS = envMs("ACK_TIMEOUT_MS", PROFILE.ack); // direct probe considered failed after this
 const INDIRECT_PROBES = 2; // helpers asked to probe on our behalf after a direct timeout
-const INDIRECT_TIMEOUT_MS = envMs("INDIRECT_TIMEOUT_MS", 1_000); // extra wait for a relayed ack before suspecting (two internet hops each way when the helper is a relay)
-const SUSPECT_TIMEOUT_MS = envMs("SUSPECT_TIMEOUT_MS", 5_000); // base suspect → dead window; scaled up with mesh size
+const INDIRECT_TIMEOUT_MS = envMs("INDIRECT_TIMEOUT_MS", PROFILE.indirect); // extra wait for a relayed ack before suspecting (two internet hops each way when the helper is a relay)
+const SUSPECT_TIMEOUT_MS = envMs("SUSPECT_TIMEOUT_MS", PROFILE.suspect); // base suspect → dead window; scaled up with mesh size
 const DEAD_PRUNE_MS = 30_000; // forget dead peers after this (bounds view + packet size)
 const ANNOUNCE_INTERVAL_MS = 30_000; // keepalive to lighthouses; the reply doubles as an anti-entropy refresh
 const REJOIN_MS = 10_000; // re-query lighthouses if our whole view has emptied
@@ -62,7 +74,12 @@ const MAX_PIGGYBACK = 24; // peer records offered per packet before size trimmin
 const MAX_RUMORS_PER_PACKET = 8; // rumors are cheap but numerous; cap them so peer records still fit
 const RESURRECT_EVERY_TICKS = 5; // how often to ping one known-dead peer (false-conviction healing)
 const SAVE_PEERS_MS = 30_000; // persist known peer addresses for rejoin-after-restart
-const KEEPALIVE_MS = envMs("KEEPALIVE_MS", 8_000); // NAT keepalive to every peer on another machine (typical UDP NAT idle timeout ≥ 30 s)
+const KEEPALIVE_MS = envMs("KEEPALIVE_MS", PROFILE.keepalive); // NAT keepalive to every peer on another machine (UDP NAT idle timeouts: ~30 s home, sometimes < 20 s on carriers)
+// Relay-aware probing: after this many direct-probe failures that a relayed
+// ack then rescued, stop trying the direct path first and probe via helpers;
+// retry the direct path every DIRECT_RETRY_MS in case the NAT opened up.
+const RELAY_AFTER_FAILS = 3;
+const DIRECT_RETRY_MS = envMs("DIRECT_RETRY_MS", 30_000);
 const PEERS_FILE = joinPath(tmpdir(), `mesh-peers-${args.id ?? "anon"}-${Number(args.port ?? 4001)}.json`);
 
 /** Suspect → dead window, scaled with view size like memberlist: rumors need
@@ -230,6 +247,7 @@ function handleMessage(msg: Message, rinfo: { address: string; port: number }): 
       if (pending && pending.target === msg.from.id) {
         clearTimeout(pending.timer);
         pendingAcks.delete(msg.seq);
+        if (msg.relayed) noteRelayedAck(msg.from.id); else noteDirectAck(msg.from.id);
       }
       break;
     }
@@ -386,6 +404,7 @@ function absorb(rumors: Rumor[], peers: PeerInfo[]): void {
     if (!r || typeof r.id !== "string" || !r.id || typeof r.inc !== "number" || !VALID_STATUS.has(r.status)) continue;
     if (membership.applyRumor(r) === "refute") {
       log(`\x1b[35mrefuting rumor that I am ${r.status} — incarnation now ${membership.selfInc}\x1b[0m`);
+      announce("refuted a suspicion — my address may have changed");
     }
   }
 }
@@ -422,9 +441,55 @@ function send(to: { host: string; port: number }, msg: Message): void {
   });
 }
 
+// ---------- per-peer path state (direct vs relay) ----------
+// Two devices behind NATs that cannot hole-punch to each other (two hotspots,
+// or two laptops behind one non-hairpinning router) can still reach each
+// other through a relay. Remember which peers need that, so we do not time out
+// a direct probe every round before asking a helper.
+interface PathState { mode: "direct" | "relay"; directFails: number; relayOk: number; lastDirectTry: number }
+const paths = new Map<string, PathState>();
+const pathFor = (id: string): PathState => {
+  let p = paths.get(id);
+  if (!p) { p = { mode: "direct", directFails: 0, relayOk: 0, lastDirectTry: 0 }; paths.set(id, p); }
+  return p;
+};
+function noteDirectAck(id: string): void {
+  const p = pathFor(id);
+  if (p.mode === "relay") log(`${id}: direct path is back — probing directly again`);
+  p.mode = "direct"; p.directFails = 0; p.relayOk = 0;
+}
+function noteRelayedAck(id: string): void {
+  const p = pathFor(id);
+  p.relayOk++;
+  if (p.mode === "direct" && p.directFails >= RELAY_AFTER_FAILS) {
+    p.mode = "relay";
+    log(`\x1b[33m${id}: no direct path (${p.directFails} probes lost, reachable via relay) — probing via helpers first\x1b[0m`);
+  }
+}
+/** Public summary for /members: which peers we can only reach via a relay. */
+function pathSummary(): Record<string, "direct" | "relay"> {
+  const out: Record<string, "direct" | "relay"> = {};
+  for (const [id, p] of paths) if (membership.allPeers().some((x) => x.id === id)) out[id] = p.mode;
+  return out;
+}
+
 // ---------- join + announce ----------
 let joined = false;
 let lastJoinAttempt = 0;
+let lastAnnounce = 0;
+/** Tell a lighthouse where we are now. Called on the 30 s timer and, rate
+ *  limited, right after we refute a suspicion — a burst of suspicions usually
+ *  means our NAT mapping changed (hotspot handover), and the lighthouse is how
+ *  everyone else learns the new address quickly. */
+function announce(reason?: string): void {
+  const lh = LIGHTHOUSES[Math.floor(Math.random() * LIGHTHOUSES.length)];
+  if (!lh) return;
+  const now = Date.now();
+  if (reason && now - lastAnnounce < 5_000) return;
+  lastAnnounce = now;
+  send(lh, { type: "announce", node: self, inc: membership.selfInc });
+  if (reason) log(`re-announced to ${lh.host}:${lh.port} (${reason})`);
+}
 
 // Last session's peer addresses (best effort — absent on first boot). Used
 // only as extra join targets: a node restarted while every lighthouse is down
@@ -452,15 +517,12 @@ setInterval(() => {
 function tryJoin(): void {
   if (joined || (LIGHTHOUSES.length === 0 && savedPeers.length === 0)) return;
   lastJoinAttempt = Date.now();
-  for (const lh of LIGHTHOUSES) send(lh, { type: "join", node: self });
-  for (const p of savedPeers.slice(0, 3)) send(p, { type: "join", node: self });
+  for (const lh of LIGHTHOUSES) send(lh, { type: "join", node: self, inc: membership.selfInc });
+  for (const p of savedPeers.slice(0, 3)) send(p, { type: "join", node: self, inc: membership.selfInc });
   setTimeout(tryJoin, 2_000); // keep retrying until someone answers
 }
 
-setInterval(() => {
-  const lh = LIGHTHOUSES[Math.floor(Math.random() * LIGHTHOUSES.length)];
-  if (lh) send(lh, { type: "announce", node: self });
-}, ANNOUNCE_INTERVAL_MS);
+setInterval(() => announce(), ANNOUNCE_INTERVAL_MS);
 
 // NAT keepalive: peers on other machines only (loopback/LAN needs none). A
 // pair's mapping stays open as long as either side sends, so with 8 s here
@@ -517,10 +579,17 @@ function protocolTick(): void {
   }
   const target = candidates[Math.floor(Math.random() * candidates.length)];
   const s = ++seq;
-  send(target, withGossip({ type: "ping", seq: s, from: self }));
-  const timer = setTimeout(() => {
-    // Direct probe failed. Before suspecting, ask a few peers to try their
-    // path (SWIM's indirect probe) — one lossy link shouldn't convict a node.
+  const path = pathFor(target.id);
+  const relayFirst = path.mode === "relay" && Date.now() - path.lastDirectTry < DIRECT_RETRY_MS;
+  if (!relayFirst) {
+    path.lastDirectTry = Date.now();
+    send(target, withGossip({ type: "ping", seq: s, from: self }));
+  }
+  const indirect = () => {
+    // Direct probe failed (or is known to fail). Before suspecting, ask a few
+    // peers to try their path (SWIM's indirect probe) — one lossy link shouldn't
+    // convict a node.
+    if (!relayFirst) path.directFails++;
     const helpers = candidates.filter((p) => p.id !== target.id);
     if (!helpers.length) {
       pendingAcks.delete(s);
@@ -549,8 +618,13 @@ function protocolTick(): void {
       membership.markSuspect(target.id);
     }, INDIRECT_TIMEOUT_MS);
     pendingAcks.set(s, { target: target.id, timer: indirectTimer });
-  }, ACK_TIMEOUT_MS);
-  pendingAcks.set(s, { target: target.id, timer });
+  };
+  if (relayFirst) {
+    indirect(); // skip the direct attempt: we know it is filtered
+  } else {
+    const timer = setTimeout(indirect, ACK_TIMEOUT_MS);
+    pendingAcks.set(s, { target: target.id, timer });
+  }
 }
 
 // ±10% jitter so a fleet booted together doesn't probe (and time out) in
@@ -635,7 +709,7 @@ createServer((req, res) => {
     serveThreat(res, url.slice("/engage/".length));
   } else if (url === "/members") {
     res.end(JSON.stringify(
-      { self: { ...self, host: selfHost, inc: membership.selfInc }, view: membership.snapshot() },
+      { self: { ...self, host: selfHost, inc: membership.selfInc }, view: membership.snapshot(), paths: pathSummary(), profile: PROFILE_NAME },
       null, 2
     ));
   } else if (url.startsWith("/resolve/")) {
@@ -658,6 +732,6 @@ createServer((req, res) => {
 
 // ---------- boot ----------
 sock.bind(PORT, () => {
-  log(`up — udp/${PORT} gossip, http/${HTTP_PORT} queries, service=${SERVICE ?? "none"}, device=${DEVICE}${ADVERTISE ? `, advertising ${ADVERTISE}` : ""}${process.env.MESH_KEY ? ", HMAC ON" : ""}`);
+  log(`up — udp/${PORT} gossip, http/${HTTP_PORT} queries, service=${SERVICE ?? "none"}, device=${DEVICE}, profile=${PROFILE_NAME}${ADVERTISE ? `, advertising ${ADVERTISE}` : ""}${process.env.MESH_KEY ? ", HMAC ON" : ""}`);
   tryJoin();
 });

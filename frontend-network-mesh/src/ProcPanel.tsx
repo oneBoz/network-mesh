@@ -97,6 +97,9 @@ export function ProcPanel({ state, onError }: { state: MeshState; onError: (m: s
                       {r.id} · udp/{r.port}
                       {" · "}<span style={{ color: STATUS_COLOR[r.status] }}>{r.status}</span>
                       {` · seen by ${r.observers}/${observers}`}
+                      {r.path === "relay" && (
+                        <span className="remote-tag" style={{ marginLeft: 6 }} title="no direct NAT path from this device — reached through a relay (e.g. the VPS node)">via relay</span>
+                      )}
                     </span>
                   </div>
                 ))}

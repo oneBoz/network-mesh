@@ -78,10 +78,13 @@ export interface Rumor {
 }
 
 export type Message =
-  | { type: "join"; node: PeerInfo } // answered by lighthouses AND any mesh node (peer-assisted join)
+  // `inc` (incarnation) lets a lighthouse tell "the same node, now at a new
+  // address" (higher inc: it refuted suspicions after its NAT mapping changed)
+  // from "a second machine claiming this id" (same or lower inc).
+  | { type: "join"; node: PeerInfo; inc?: number } // answered by lighthouses AND any mesh node (peer-assisted join)
   // `from` is set when a mesh node (not a lighthouse) answers a join.
   | { type: "join-ack"; peers: PeerInfo[]; from?: PeerInfo }
-  | { type: "announce"; node: PeerInfo } // periodic keepalive to lighthouses
+  | { type: "announce"; node: PeerInfo; inc?: number } // periodic keepalive to lighthouses
   | { type: "ping"; seq: number; from: PeerInfo; rumors: Rumor[]; peers: PeerInfo[] }
   // "please probe `target` for me" — SWIM's indirect probe, sent when a direct
   // probe times out so one lossy path doesn't create a false suspicion.

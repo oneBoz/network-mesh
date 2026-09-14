@@ -56,6 +56,7 @@ export interface NodeView {
   inc: number;
   service?: string;
   view: Record<string, ViewEntry>;
+  paths?: Record<string, "direct" | "relay">; // peers this node can only reach through a relay
 }
 
 /** A mesh member that is NOT a process of this dashboard: a node on another
@@ -71,6 +72,7 @@ export interface RemoteMember {
   service?: string;
   skills?: Skills;
   status: NodeStatus; // majority across local reachable observers, ties pessimistic
+  path?: "direct" | "relay"; // "relay" when every local observer reaches it only via a relay (no direct NAT path)
   inc: number;
   since: number; // earliest `since` any local observer reports
   observers: number; // local nodes that currently hold an entry for it

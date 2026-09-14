@@ -75,6 +75,23 @@ If the LAN blocks device-to-device traffic (some campus/guest Wi-Fi), fall back
 to section 1 only: the two devices will still see each other, kept alive
 through the VM's relays, just without a direct path.
 
+## 2b. Device on a phone hotspot or other carrier network
+
+Same as section 1, plus set the timer preset in `.env`:
+
+```
+MESH_PROFILE=mobile
+```
+
+Carrier NATs remap per destination and drop idle mappings within ~30 s, so
+the mobile preset keeps a 5 s keepalive to every remote peer and waits longer
+before suspecting anyone. Two hotspot devices can never reach each other
+directly; the mesh detects that and probes them through the VPS nodes instead
+(the other device shows **via relay** in the fleet panel), and signals already
+take the relay first. When the hotspot's public address changes (handover,
+carrier re-map) the device refutes the resulting suspicions, re-announces to
+the lighthouse immediately and is accepted at its new address without waiting.
+
 ## 3. A new always-on public site (another VPS)
 
 Give it a public IP, open inbound UDP 5001-5003 and 4001-4010, install Docker,

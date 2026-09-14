@@ -39,6 +39,7 @@ if (process.env.REQUIRE_MESH_KEY && !process.env.MESH_KEY) {
 interface Registered {
   info: PeerInfo;
   lastSeen: number;
+  inc: number; // incarnation the node last announced with
 }
 
 const registry = new Map<string, Registered>();
@@ -84,13 +85,20 @@ sock.on("message", (buf, rinfo) => {
     // not the address the node thinks it has) — unless it explicitly
     // advertises a public host (see PeerInfo.advertise).
     const info: PeerInfo = observed(node, rinfo);
+    const inc = typeof msg.inc === "number" ? msg.inc : 0;
     const cur = registry.get(node.id);
-    if (cur && (cur.info.host !== info.host || cur.info.port !== info.port)
-        && Date.now() - cur.lastSeen < ID_CONFLICT_MS) {
-      log(`id conflict: "${node.id}" from ${info.host}:${info.port} but actively registered at ${cur.info.host}:${cur.info.port} — ignoring`);
+    const moved = !!cur && (cur.info.host !== info.host || cur.info.port !== info.port);
+    if (moved && Date.now() - cur!.lastSeen < ID_CONFLICT_MS && inc <= cur!.inc) {
+      // Same id, different address, no newer incarnation: most likely a second
+      // machine misconfigured with the same name. A node whose NAT mapping
+      // changed (hotspot handover, carrier re-map) shows up with a HIGHER
+      // incarnation — it refuted the suspicions its old address caused — and is
+      // accepted immediately, without waiting out ID_CONFLICT_MS.
+      log(`id conflict: "${node.id}" from ${info.host}:${info.port} (inc ${inc}) but actively registered at ${cur!.info.host}:${cur!.info.port} (inc ${cur!.inc}) — ignoring`);
       return;
     }
-    registry.set(info.id, { info, lastSeen: Date.now() });
+    if (moved) log(`${node.id} moved ${cur!.info.host}:${cur!.info.port} → ${info.host}:${info.port} (inc ${cur!.inc} → ${inc})`);
+    registry.set(info.id, { info, lastSeen: Date.now(), inc: Math.max(inc, cur?.inc ?? 0) });
 
     // Both join AND announce get a peer list back. Answering the periodic
     // announce turns the keepalive into an anti-entropy channel: after a

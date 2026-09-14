@@ -158,6 +158,9 @@ function deriveRemotes(procs: ProcState[], views: NodeView[]): RemoteMember[] {
       }
       r.observers++;
       r.votes[e.status]++;
+      // "relay" only if every observer that has an opinion says relay.
+      const p = v.paths?.[id];
+      if (p) r.path = r.path === undefined ? p : (r.path === "relay" && p === "relay" ? "relay" : "direct");
       if (e.inc > r.inc) r.inc = e.inc;
       if (e.since < r.since) r.since = e.since;
       // Prefer the address held by an observer that currently reaches it.
@@ -182,8 +185,9 @@ async function pollNode(id: string, httpPort: number): Promise<NodeView> {
     const body = (await r.json()) as {
       self: { id: string; inc: number; service?: string };
       view: NodeView["view"];
+      paths?: NodeView["paths"];
     };
-    return { id, reachable: true, inc: body.self.inc, service: body.self.service, view: body.view };
+    return { id, reachable: true, inc: body.self.inc, service: body.self.service, view: body.view, paths: body.paths };
   } catch {
     return { id, reachable: false, inc: 0, view: {} };
   }

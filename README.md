@@ -105,6 +105,7 @@ and streams new messages over SSE.
 | `EXTRA_LIGHTHOUSES` | empty | `host:port,host:port` of lighthouses on other machines. Every node the dashboard spawns joins them too. |
 | `DEVICE_NAME` | `local-device` (Docker) / hostname (native) | Label for this machine on other devices' dashboards and on the signals it sends; also the id suffix when several devices boot the demo. |
 | `ADVERTISE` | empty | Public IP of *this* host. Only for a dashboard running on a VPS (see the host-network override). |
+| `MESH_PROFILE` | `local` | Timer preset: `local`, `internet`, or `mobile` for a phone hotspot / carrier NAT (longer ack and suspect windows, 5 s keepalive). |
 
 Sample data is built in: the 5 defense systems and their skill table live in
 [`backend-network-mesh/src/skills.ts`](backend-network-mesh/src/skills.ts);

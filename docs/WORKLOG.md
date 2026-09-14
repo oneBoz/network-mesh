@@ -161,6 +161,13 @@ to single digits once the datagram cap went in (before `mac02` joined).
 an empty key); rejected packets are logged per source address with a running
 count. Key rotated and removed from the repo.
 
+**Mobile / hotspot robustness.** `MESH_PROFILE` presets (local / internet /
+mobile); join/announce carry the incarnation so a lighthouse accepts a node
+that moved to a new address at once (and nodes re-announce right after
+refuting a suspicion); relay-aware probing remembers peers reachable only
+via a relay and probes them through helpers first, retrying direct every
+30 s; `/members` exposes `paths`, the dashboard shows "via relay".
+
 **Lessons worth remembering.**
 - Anything that works on loopback but flaps on the internet: check datagram
   size first. Fragments are dropped silently.
