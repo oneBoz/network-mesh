@@ -15,7 +15,7 @@
 import { createSocket } from "node:dgram";
 import { makeLogger, parseArgs } from "./cli.js";
 import type { PeerInfo } from "./protocol.js";
-import { decode, encode } from "./protocol.js";
+import { decode, encode, observed } from "./protocol.js";
 
 const args = parseArgs(process.argv.slice(2));
 const PORT = Number(args.port ?? 5001);
@@ -65,16 +65,17 @@ sock.on("message", (buf, rinfo) => {
     // Refuse a second machine claiming an id that is actively registered from
     // elsewhere — otherwise two nodes fight an incarnation war over one entry.
     // (A node re-registering from its own address, e.g. after a restart, is fine.)
-    const cur = registry.get(node.id);
-    if (cur && (cur.info.host !== rinfo.address || cur.info.port !== rinfo.port)
-        && Date.now() - cur.lastSeen < ID_CONFLICT_MS) {
-      log(`id conflict: "${node.id}" from ${rinfo.address}:${rinfo.port} but actively registered at ${cur.info.host}:${cur.info.port} — ignoring`);
-      return;
-    }
     // Record the peer, using the *observed* source address (NAT-friendly:
     // this is the hole-punching trick — we tell peers the address we saw,
-    // not the address the node thinks it has).
-    const info: PeerInfo = { ...node, host: rinfo.address, port: rinfo.port };
+    // not the address the node thinks it has) — unless it explicitly
+    // advertises a public host (see PeerInfo.advertise).
+    const info: PeerInfo = observed(node, rinfo);
+    const cur = registry.get(node.id);
+    if (cur && (cur.info.host !== info.host || cur.info.port !== info.port)
+        && Date.now() - cur.lastSeen < ID_CONFLICT_MS) {
+      log(`id conflict: "${node.id}" from ${info.host}:${info.port} but actively registered at ${cur.info.host}:${cur.info.port} — ignoring`);
+      return;
+    }
     registry.set(info.id, { info, lastSeen: Date.now() });
 
     // Both join AND announce get a peer list back. Answering the periodic

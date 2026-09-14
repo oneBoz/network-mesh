@@ -35,12 +35,20 @@ export class ProcManager {
 
   constructor(private onLog: (source: string, line: string) => void) {}
 
-  /** All configured lighthouses, as the --lighthouses argument for nodes. */
+  /** Lighthouses on OTHER machines, from EXTRA_LIGHTHOUSES ("host:port,host:port").
+   *  Every node spawned here joins them too, so a mesh booted by this
+   *  dashboard merges with peers across the internet — the remote lighthouse
+   *  records the NAT-mapped address it observes and hands it out to everyone. */
+  extraLighthouses(): string[] {
+    return (process.env.EXTRA_LIGHTHOUSES ?? "").split(",").map((s) => s.trim()).filter(Boolean);
+  }
+
+  /** All configured lighthouses (local children + external), as the --lighthouses argument for nodes. */
   lighthouseAddrs(): string {
-    return [...this.procs.values()]
+    const local = [...this.procs.values()]
       .filter((m) => m.spec.kind === "lighthouse")
-      .map((m) => `127.0.0.1:${m.spec.port}`)
-      .join(",");
+      .map((m) => `127.0.0.1:${m.spec.port}`);
+    return local.concat(this.extraLighthouses()).join(",");
   }
 
   get(name: string): Managed | undefined {

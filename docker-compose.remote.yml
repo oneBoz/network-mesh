@@ -1,0 +1,48 @@
+# Remote site: one lighthouse + one defense node, no dashboard. Run this on a
+# Linux VPS with a public IP to give the local demo real peers on another
+# network. Judges do NOT need this file; the local demo is self-contained.
+#
+#   PUBLIC_IP=203.0.113.10 MESH_KEY=hackathon-demo-key \
+#     docker compose -f docker-compose.remote.yml up -d
+#
+# Then on every other machine set EXTRA_LIGHTHOUSES=203.0.113.10:5001 (with the
+# same MESH_KEY) and `docker compose up`. Open inbound UDP 5001 and 4001 on the
+# VPS firewall / security group.
+#
+# Host networking (Linux only) so the lighthouse sees real source addresses.
+# --advertise is required: this node joins its lighthouse over loopback, and
+# without it the lighthouse would hand "127.0.0.1" to the whole internet.
+services:
+  lighthouse:
+    build: .
+    image: network-mesh:0.1.0
+    network_mode: host
+    environment:
+      MESH_KEY: ${MESH_KEY:-}
+    command: ["node", "--import", "tsx", "src/lighthouse.ts", "--port", "5001"]
+    restart: unless-stopped
+
+  node:
+    image: network-mesh:0.1.0
+    network_mode: host
+    depends_on: [lighthouse]
+    environment:
+      MESH_KEY: ${MESH_KEY:-}
+    command:
+      - node
+      - --import
+      - tsx
+      - src/node.ts
+      - --id
+      - ${SITE_ID:-vps-1}
+      - --service
+      - ${SITE_SERVICE:-aegis}
+      - --port
+      - "4001"
+      - --http
+      - "8001"
+      - --lighthouses
+      - 127.0.0.1:5001
+      - --advertise
+      - ${PUBLIC_IP:?set PUBLIC_IP to this machine's public IP or DNS name}
+    restart: unless-stopped

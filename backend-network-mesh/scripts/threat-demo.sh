@@ -6,7 +6,7 @@
 # re-deciding: aegis → smartfalcon → edgefuse → aegis again after revive.
 # The sleeps are the SWIM suspect window — the honest cost of failure detection.
 set -euo pipefail
-API=${API:-http://127.0.0.1:7000}
+API=${API:-http://127.0.0.1:7070}
 
 threat() {
   curl -s -X POST "$API/api/threat" -H 'content-type: application/json' \

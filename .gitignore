@@ -1,0 +1,13 @@
+# dependencies / build output (per-package .gitignore files also cover these)
+**/node_modules/
+**/dist/
+
+# environment / secrets — keep only the example
+.env
+.env.*
+!.env.example
+
+# OS / editor junk
+.DS_Store
+Thumbs.db
+*.swp

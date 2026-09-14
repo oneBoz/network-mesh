@@ -15,6 +15,10 @@
  * Usage:
  *   npx tsx src/node.ts --id A1 --port 4001 --http 8001 --service api \
  *     --lighthouses 127.0.0.1:5001,127.0.0.1:5002,127.0.0.1:5003
+ *
+ *   --advertise <public-ip-or-dns>   required when this node shares a machine
+ *     with a lighthouse it joins over loopback (e.g. a VPS): otherwise the
+ *     lighthouse records it as 127.0.0.1 and internet peers can never reach it.
  */
 import { createSocket } from "node:dgram";
 import type { Socket } from "node:dgram";
@@ -25,7 +29,7 @@ import { join as joinPath } from "node:path";
 import { makeLogger, parseArgs } from "./cli.js";
 import { Membership } from "./swim.js";
 import type { Message, PeerInfo, Rumor, Skills, ThreatEvent, ThreatType } from "./protocol.js";
-import { decode, encode } from "./protocol.js";
+import { decode, encode, observed } from "./protocol.js";
 import type { Assignment } from "./skills.js";
 import { matchmake, SKILL_TABLE, THREAT_TYPES, toAssignment } from "./skills.js";
 
@@ -35,6 +39,7 @@ const ID = args.id ?? `node-${Math.random().toString(36).slice(2, 7)}`;
 const PORT = Number(args.port ?? 4001);
 const HTTP_PORT = Number(args.http ?? PORT + 4000);
 const SERVICE = args.service;
+const ADVERTISE = args.advertise && args.advertise !== "true" ? args.advertise : undefined;
 const LIGHTHOUSES = (args.lighthouses ?? "").split(",").filter(Boolean).map((s) => {
   const [host, port] = s.split(":");
   return { host, port: Number(port) };
@@ -78,7 +83,8 @@ function parseSkills(raw: string | undefined): Skills | undefined {
 const SKILLS = parseSkills(args.skills);
 
 const self: PeerInfo = {
-  id: ID, host: "0.0.0.0", port: PORT, httpPort: HTTP_PORT, service: SERVICE, skills: SKILLS,
+  id: ID, host: ADVERTISE ?? "0.0.0.0", port: PORT, httpPort: HTTP_PORT, service: SERVICE, skills: SKILLS,
+  ...(ADVERTISE ? { advertise: ADVERTISE } : {}),
 };
 
 // ---------- membership ----------
@@ -138,7 +144,7 @@ function handleMessage(msg: Message, rinfo: { address: string; port: number }): 
     // address, but we can see exactly where its packet came from. Relayed acks
     // are the exception: the UDP source is the helper, not `from`.
     if (msg.type !== "ack" || !msg.relayed) {
-      msg.from = { ...msg.from, host: rinfo.address, port: rinfo.port };
+      msg.from = observed(msg.from, rinfo);
     }
   }
   switch (msg.type) {
@@ -148,7 +154,7 @@ function handleMessage(msg: Message, rinfo: { address: string; port: number }): 
       // bootstrap through anyone it once knew.
       const node = msg.node as PeerInfo | undefined;
       if (!node || typeof node.id !== "string" || !node.id || node.id === ID) return;
-      const joiner: PeerInfo = { ...node, host: rinfo.address, port: rinfo.port };
+      const joiner: PeerInfo = observed(node, rinfo);
       membership.upsertPeer(joiner, true);
       send(joiner, {
         type: "join-ack", from: self,
@@ -163,7 +169,7 @@ function handleMessage(msg: Message, rinfo: { address: string; port: number }): 
       // A peer (not a lighthouse) answered — it told us who it is, and this
       // packet came straight from it, so trust the observed address.
       if (msg.from && typeof msg.from.id === "string" && msg.from.id) {
-        membership.upsertPeer({ ...msg.from, host: rinfo.address, port: rinfo.port }, true);
+        membership.upsertPeer(observed(msg.from, rinfo), true);
       }
       if (!joined) {
         joined = true; // even an empty mesh counts as joined
@@ -492,6 +498,6 @@ createServer((req, res) => {
 
 // ---------- boot ----------
 sock.bind(PORT, () => {
-  log(`up — udp/${PORT} gossip, http/${HTTP_PORT} queries, service=${SERVICE ?? "none"}${process.env.MESH_KEY ? ", HMAC ON" : ""}`);
+  log(`up — udp/${PORT} gossip, http/${HTTP_PORT} queries, service=${SERVICE ?? "none"}${ADVERTISE ? `, advertising ${ADVERTISE}` : ""}${process.env.MESH_KEY ? ", HMAC ON" : ""}`);
   tryJoin();
 });

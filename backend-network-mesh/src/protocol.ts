@@ -42,6 +42,13 @@ export interface PeerInfo {
   httpPort?: number; // query API port
   service?: string; // e.g. "api", "inventory"
   skills?: Skills; // defense capabilities (lighthouses and plain nodes have none)
+  /** Explicit reachable host (public IP or DNS name), set with --advertise.
+   *  Normally receivers trust the UDP source address they observe (which is
+   *  what makes NAT hole punching work), but a node that talks to its own
+   *  lighthouse over loopback — the usual layout on a VPS — would be recorded
+   *  as 127.0.0.1 and handed out as such to the whole internet. `advertise`
+   *  overrides the observed host (and keeps the node's own bind port). */
+  advertise?: string;
 }
 
 /** A membership rumor: "node <id> is <status>, as of incarnation <inc>". */
@@ -114,6 +121,15 @@ export function decode(buf: Buffer, onDrop?: (reason: string) => void): Message 
   } catch {
     return null;
   }
+}
+
+/** The address to record for a peer whose packet just arrived from `rinfo`:
+ *  its advertised host if it declared one, otherwise the observed source. */
+export function observed(info: PeerInfo, rinfo: { address: string; port: number }): PeerInfo {
+  if (typeof info.advertise === "string" && info.advertise) {
+    return { ...info, host: info.advertise };
+  }
+  return { ...info, host: rinfo.address, port: rinfo.port };
 }
 
 /** Rumor precedence, straight from the SWIM paper:

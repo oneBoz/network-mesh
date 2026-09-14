@@ -1,0 +1,28 @@
+# Whole system in one container: the dashboard control plane (port 7070)
+# spawns the lighthouses and mesh nodes as child processes inside it, exactly
+# as it does natively. Target: `docker compose up` and nothing else.
+services:
+  mesh:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: network-mesh:0.1.0
+    container_name: network-mesh
+    environment:
+      # Dashboard bind (inside the container). The host-side mapping below is
+      # loopback-only, so the control API is still unreachable from the LAN.
+      HOST: 0.0.0.0
+      PORT: "7070"
+      MESH_KEY: ${MESH_KEY:-}
+      EXTRA_LIGHTHOUSES: ${EXTRA_LIGHTHOUSES:-}
+    ports:
+      - "127.0.0.1:7070:7070"          # dashboard + control API, http://localhost:7070
+      - "4001-4008:4001-4008/udp"      # node gossip ports  (lets peers on other machines reach these nodes)
+      - "5001-5003:5001-5003/udp"      # lighthouse ports   (lets other machines join via this fleet)
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:7070/api/state"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 5s

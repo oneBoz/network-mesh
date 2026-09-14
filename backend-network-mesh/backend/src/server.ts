@@ -26,7 +26,7 @@
  * (../network-mesh-frontend/dist), overridable with FRONTEND_DIST. During
  * development the Vite dev server proxies /api here instead.
  *
- * Usage: npx tsx backend/src/server.ts [--port 7000]
+ * Usage: npx tsx backend/src/server.ts [--port 7070]
  */
 import { createSocket } from "node:dgram";
 import { createServer } from "node:http";
@@ -38,7 +38,13 @@ import { ProcManager, ROOT } from "./procman.js";
 import type { LogEvent, MeshState, NodeView, ProcSpec, ThreatAssignmentEvent, ThreatType } from "./types.js";
 
 const portFlag = process.argv.indexOf("--port");
-const PORT = portFlag !== -1 ? Number(process.argv[portFlag + 1]) : 7000;
+const PORT = portFlag !== -1 ? Number(process.argv[portFlag + 1]) : Number(process.env.PORT ?? 7070);
+// Loopback by default: this API can spawn and kill processes. Inside a
+// container the host cannot reach loopback, so compose sets HOST=0.0.0.0 and
+// relies on the port mapping (bound to 127.0.0.1 on the host) for isolation.
+const HOST = process.env.HOST ?? "127.0.0.1";
+// 7070, not 7000: macOS Control Center (AirPlay Receiver) listens on *:7000 on
+// every stock Mac and answers HTTP with a bare 403, which is very confusing.
 const POLL_MS = 1_000;
 const POLL_TIMEOUT_MS = 600;
 // The dashboard lives in its own repo. Serve its production build when one
@@ -373,10 +379,10 @@ const server = createServer(async (req, res) => {
   }
 });
 
-// Loopback only — this API can spawn and kill processes, so never expose it
-// to the network.
-server.listen(PORT, "127.0.0.1", () => {
-  console.log(`[backend] dashboard control plane on http://127.0.0.1:${PORT}`);
+server.listen(PORT, HOST, () => {
+  console.log(`[backend] dashboard control plane on http://${HOST}:${PORT}`);
+  const extra = procman.extraLighthouses();
+  if (extra.length) console.log(`[backend] nodes will also join external lighthouses: ${extra.join(", ")}`);
   console.log(`[backend] POST /api/demo to boot the standard 3-lighthouse / 5-system defense mesh`);
 });
 

@@ -2,7 +2,7 @@
 
 Vite + React dashboard for the **mesh-ts** overlay mesh: live topology, convergence matrix, fleet controls, service resolver, and a streaming log.
 
-The mesh itself and the dashboard's control plane live in the **backend-network-mesh** repo. This repo is pure presentation — it talks to the backend's REST + SSE API on port 7000 and never touches the mesh directly.
+The mesh itself and the dashboard's control plane live in the **backend-network-mesh** repo. This repo is pure presentation — it talks to the backend's REST + SSE API on port 7070 and never touches the mesh directly.
 
 ## Setup
 
@@ -15,7 +15,7 @@ The mesh itself and the dashboard's control plane live in the **backend-network-
 
 Start the backend first (in the backend-network-mesh repo):
 
-    npm run dev        # control plane on http://127.0.0.1:7000
+    npm run dev        # control plane on http://127.0.0.1:7070
 
 Then here:
 
@@ -38,14 +38,14 @@ UI just renders what the control plane streams:
   the next layer step in.
 - **Resolve** — service discovery through any live node, like Consul DNS.
 
-All `/api` traffic (including the SSE stream) is proxied to `127.0.0.1:7000`
+All `/api` traffic (including the SSE stream) is proxied to `127.0.0.1:7070`
 by the Vite dev server — see `vite.config.ts`.
 
 ## Production build
 
     npm run build      # typechecks, then emits dist/
 
-The backend serves `dist/` itself at http://127.0.0.1:7000 when this repo is
+The backend serves `dist/` itself at http://127.0.0.1:7070 when this repo is
 checked out as a sibling directory (`../frontend-network-mesh`); set
 `FRONTEND_DIST=/path/to/dist` on the backend to serve it from anywhere else.
 

@@ -2,7 +2,7 @@
 
 A self-healing overlay mesh in TypeScript, using **only Node built-ins** (`dgram`, `http`, `crypto`), plus the dashboard **control plane** that spawns and observes mesh processes. It implements the same architecture as the Nebula + Consul design: lighthouses broker joins, SWIM gossip tracks membership, and every node answers service-discovery queries from its own local view — no single point of failure anywhere.
 
-The dashboard UI lives in its own repo: **frontend-network-mesh** (Vite + React). Check both out side by side; the frontend's dev server proxies `/api` to this backend on port 7000.
+The dashboard UI lives in its own repo: **frontend-network-mesh** (Vite + React). Check both out side by side; the frontend's dev server proxies `/api` to this backend on port 7070.
 
 ## Layout
 
@@ -42,7 +42,18 @@ every process it spawns.
 
 ## Run the control plane
 
-    npm run dev    # dashboard control plane on http://127.0.0.1:7000
+    npm run dev    # dashboard control plane on http://127.0.0.1:7070
+
+(7070, not 7000: macOS AirPlay Receiver already listens on 7000 on every Mac.)
+
+Environment knobs, all optional:
+
+| Variable | Default | Effect |
+|---|---|---|
+| `MESH_KEY` | unset | Shared HMAC secret passed to every child; unsigned packets are dropped when set |
+| `EXTRA_LIGHTHOUSES` | unset | `host:port,...` of lighthouses on other machines; every spawned node joins them too (this is how one dashboard's fleet merges with peers across the internet) |
+| `HOST` / `PORT` | `127.0.0.1` / `7070` | Bind address of the control API. Only Docker sets `HOST=0.0.0.0`; the compose port mapping is loopback-only on the host |
+| `FRONTEND_DIST` | `../frontend-network-mesh/dist` | Where to serve the dashboard build from |
 
 Then start the frontend dev server from the **frontend-network-mesh** repo
 (`npm run dev` there, UI on http://localhost:5173), or `POST /api/demo` and
@@ -50,7 +61,7 @@ drive everything with curl. The control plane binds to loopback only — it can
 spawn and kill processes, so it is deliberately unreachable from other machines.
 
 If a production build of the dashboard exists it is served at
-http://127.0.0.1:7000 — by default from a sibling checkout at
+http://127.0.0.1:7070 — by default from a sibling checkout at
 `../frontend-network-mesh/dist`; set `FRONTEND_DIST=/path/to/dist` to override.
 
 ### Control-plane API (all JSON)
@@ -90,6 +101,16 @@ Every process simulates one physical server. Ports stand in for machines, so you
 Or boot everything at once:
 
     npm run demo
+
+A node that shares a machine with a lighthouse it joins over loopback (the
+normal layout on a public VPS) must say how the outside world reaches it,
+otherwise the lighthouse records it as `127.0.0.1` and hands that out:
+
+    npx tsx src/node.ts --id vps-1 --port 4001 --http 8001 --service aegis \
+      --lighthouses 127.0.0.1:5001 --advertise <public-ip-or-dns>
+
+Everything else keeps trusting the *observed* UDP source address, which is what
+makes NAT hole punching work for nodes behind home routers (see the root README).
 
 Optional message signing (built-in crypto, satisfies "only my servers can talk"):
 
