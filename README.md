@@ -12,6 +12,8 @@ real mesh processes and shows the fleet converge.
 | [`backend-network-mesh/`](backend-network-mesh/README.md) | The mesh (`src/`) and the dashboard control plane (`backend/`) |
 | [`frontend-network-mesh/`](frontend-network-mesh/README.md) | The dashboard UI (Vite + React), served by the control plane |
 | [`PLAN.md`](PLAN.md) | Roadmap to a multi-device, internet-wide, encrypted product |
+| [`docs/WORKLOG.md`](docs/WORKLOG.md) | What was built and why, current state of every machine (Azure VM access, secrets, open items) — read this first when continuing on another device |
+| [`docs/ADDING-A-DEVICE.md`](docs/ADDING-A-DEVICE.md) | Step-by-step guide to joining a new machine to the mesh (other network, same LAN, or a new VPS) |
 
 ---
 
@@ -259,6 +261,8 @@ Dockerfile                  multi-stage build: dashboard + control plane in one 
 docker-compose.yml          the whole system, `docker compose up`
 docker-compose.remote.yml   optional lightweight remote site (lighthouse + node) for a public VPS
 docker-compose.host.yml     override: the full dashboard on a public VPS as a second device
+docs/WORKLOG.md             work log + current state of every machine
+docs/ADDING-A-DEVICE.md     how to add a device
 .env.example                MESH_KEY, EXTRA_LIGHTHOUSES
 scripts/smoke.mjs           end-to-end check against a running dashboard
 backend-network-mesh/       mesh + control plane (see its README for the protocol and API)
