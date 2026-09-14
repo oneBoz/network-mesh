@@ -93,7 +93,12 @@ export type Message =
   // carries no rumors/peers piggyback and never touches membership state.
   | { type: "threat"; event: ThreatEvent; ttl: number; from: PeerInfo }
   // Application data channel (TTL + dedupe-by-id). Never touches membership.
-  | { type: "msg"; msg: MeshMessage; ttl: number; from: PeerInfo };
+  | { type: "msg"; msg: MeshMessage; ttl: number; from: PeerInfo }
+  // NAT keepalive: a tiny no-op sent to every peer on another machine every
+  // few seconds so the NAT mapping for that pair never idles out. Without it,
+  // a peer's direct probe hits a closed mapping and the mesh falsely suspects
+  // us even though we are fine. Receivers just refresh the sender's address.
+  | { type: "keepalive"; from: PeerInfo };
 
 /**
  * Hard cap on an encoded datagram. Anything over the path MTU (~1472 bytes of
@@ -102,7 +107,7 @@ export type Message =
  * works, on the real internet every probe fails. Gossip is incremental, so
  * shipping fewer peers/rumors per packet costs only a little convergence time.
  */
-export const MAX_DATAGRAM = 1_200;
+export const MAX_DATAGRAM = 1_350;
 
 /** Drop items from `items` (from the front, or from the back when `fromBack`)
  *  until the message `build` makes from them encodes under MAX_DATAGRAM. Always

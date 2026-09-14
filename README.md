@@ -172,9 +172,11 @@ The dashboard shows the other machine as a first-class member:
 
 - Header: an **n/m remote · internet** counter.
 - Topology: the external lighthouse as a dashed diamond marked INTERNET, and
-  each remote node as a circle with a dashed blue ring and its public address,
-  linked to the local nodes that currently believe it alive. Threat rings and
-  fallback ranks apply to remote nodes exactly like local ones.
+  each remote **device** as one card (name, IP, alive count, systems) linked to
+  the local nodes that believe its members alive. Threat rings and fallback
+  ranks roll up onto the card. **expand devices** switches to one glyph per
+  remote node in a column per device; **links on/off** hides the gossip web.
+  Both toggles persist in the browser.
 - Convergence matrix: remote nodes as extra columns (⟡). Rows stay local,
   because the dashboard never polls another machine; what it knows about a
   remote comes purely from gossip, which is the point.
@@ -216,9 +218,24 @@ Its lighthouse on UDP 5001 replaces the lightweight remote site, so other
 devices keep using `EXTRA_LIGHTHOUSES=<vps public ip>:5001`. Open UDP 4001-4010
 and 5001-5003 on the VPS firewall.
 
-Two devices on the **same LAN** need no VPS at all: run the lighthouse on
-either one and point the other at `<its LAN ip>:5001` via `EXTRA_LIGHTHOUSES`.
-The compose file publishes UDP 4001-4008 and 5001-5003 for exactly this.
+**Two devices on the same LAN / behind the same router** (two Mac minis on one
+Wi-Fi is the typical judging setup): point them at **each other's LAN address**,
+with or without the VPS:
+
+```
+# Mac mini A (LAN 192.168.0.13)          # Mac mini B (LAN 192.168.0.14)
+EXTRA_LIGHTHOUSES=192.168.0.14:5001      EXTRA_LIGHTHOUSES=192.168.0.13:5001
+DEVICE_NAME=mini-a                       DEVICE_NAME=mini-b
+```
+
+Add `,<vps public ip>:5001` to both to include the VPS. This matters: two
+devices behind the *same* router learn each other's **public** address from an
+outside lighthouse, and most home routers do not hairpin traffic to their own
+public IP, so direct probes between the two fail and the mesh keeps them alive
+only through relays. A LAN lighthouse hands out LAN addresses, which is what
+those two devices should use. The compose file publishes UDP 4001-4008 and
+5001-5003 on the host for exactly this. (Find a Mac's LAN address with
+`ipconfig getifaddr en0`.)
 
 ---
 

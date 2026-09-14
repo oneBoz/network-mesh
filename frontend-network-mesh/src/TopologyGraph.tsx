@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState } from "react";
 import type { MeshState, NodeStatus, RemoteMember, ThreatAssignmentEvent } from "./types";
 import { consensus } from "./consensus";
-import { defenseTooltip, systemOf } from "./defense";
+import { defenseTooltip, systemName, systemOf } from "./defense";
 import { groupRemotes, remoteDevice } from "./remotes";
+import type { RemoteDevice } from "./remotes";
 
 const COLOR: Record<NodeStatus | "unknown", string> = {
   alive: "var(--alive)",
@@ -16,7 +17,9 @@ const H = 520;
 const MARGIN = 30;
 const POS_KEY = "mesh-topology-positions";
 const LINKS_KEY = "mesh-topology-routers";
+const VIEW_KEY = "mesh-topology-view"; // { collapse, showLinks }
 const CLICK_SLOP = 4; // px of pointer travel below which pointerdown→up counts as a click
+const COL_W = 118; // width of one remote-device column (expanded view)
 
 interface XY {
   x: number;
@@ -24,6 +27,11 @@ interface XY {
 }
 
 type Link = [string, string];
+
+interface ViewOptions {
+  collapse: boolean; // one card per remote device instead of one glyph per node
+  showLinks: boolean; // draw the gossip web
+}
 
 /**
  * Physical-topology overlay: the defense layers hand off through commercial
@@ -39,11 +47,18 @@ const DEFAULT_LINKS: Link[] = [
 ];
 const routerId = (a: string, b: string) => `rtr:${a}:${b}`;
 const linkKey = ([a, b]: Link) => (a < b ? `${a}|${b}` : `${b}|${a}`);
+const xlhId = (addr: string) => `xlh:${addr}`;
+const devId = (device: string) => `dev:${device}`;
 
 function loadJson<T>(key: string, fallback: T): T {
   try {
     const raw = localStorage.getItem(key);
-    return raw ? (JSON.parse(raw) as T) : fallback;
+    if (!raw) return fallback;
+    const parsed = JSON.parse(raw) as T;
+    // Plain-object settings merge over their defaults (new keys get a default);
+    // arrays and everything else are taken as stored.
+    const plain = (v: unknown) => !!v && typeof v === "object" && !Array.isArray(v);
+    return plain(fallback) && plain(parsed) ? { ...fallback, ...parsed } : parsed;
   } catch {
     return fallback;
   }
@@ -51,15 +66,28 @@ function loadJson<T>(key: string, fallback: T): T {
 
 const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v));
 
+/** Worst-of consensus for a whole device: suspect if any member is suspect,
+ *  dead only if every member is dead, alive if every member is alive. */
+function deviceBelief(d: RemoteDevice): NodeStatus | "unknown" {
+  const statuses = d.members.map((m) => m.status);
+  if (statuses.every((s) => s === "dead")) return "dead";
+  if (statuses.some((s) => s === "suspect")) return "suspect";
+  if (statuses.some((s) => s === "alive")) return "alive";
+  return "unknown";
+}
+
 /**
  * Live topology. Node color = mesh consensus about that node; a dashed red
  * ring means the process is actually down (ground truth) — watch the ring
  * appear instantly on a kill while the fill takes seconds to catch up: that
  * lag is SWIM's suspect→dead detection window happening in real time.
  *
- * Every glyph is draggable; dragged positions and the router set persist in
- * localStorage. Undragged glyphs keep their computed default (routers: the
- * live midpoint of their endpoints, so they follow when an endpoint moves).
+ * Members on other machines are drawn on the right: one card per device
+ * (default) or, expanded, one glyph per node in a column per device.
+ *
+ * Every glyph is draggable; dragged positions, the router set and the view
+ * options persist in localStorage. Undragged glyphs keep their computed
+ * default (routers: the live midpoint of their endpoints).
  */
 export function TopologyGraph({
   state,
@@ -71,6 +99,7 @@ export function TopologyGraph({
   const svgRef = useRef<SVGSVGElement>(null);
   const [pos, setPos] = useState<Record<string, XY>>(() => loadJson(POS_KEY, {}));
   const [links, setLinks] = useState<Link[]>(() => loadJson(LINKS_KEY, DEFAULT_LINKS));
+  const [view, setView] = useState<ViewOptions>(() => loadJson(VIEW_KEY, { collapse: true, showLinks: true }));
   const [linkMode, setLinkMode] = useState(false);
   const [linkFrom, setLinkFrom] = useState<string | null>(null);
   const drag = useRef<{ name: string; dx: number; dy: number; sx: number; sy: number; moved: boolean } | null>(null);
@@ -84,6 +113,9 @@ export function TopologyGraph({
   useEffect(() => {
     localStorage.setItem(LINKS_KEY, JSON.stringify(links));
   }, [links]);
+  useEffect(() => {
+    localStorage.setItem(VIEW_KEY, JSON.stringify(view));
+  }, [view]);
 
   useEffect(() => {
     if (!linkMode) return;
@@ -110,11 +142,13 @@ export function TopologyGraph({
   const remotes = state.remotes;
   const remoteDevices = groupRemotes(remotes);
   const extraLh = state.extraLighthouses;
-  const xlhId = (addr: string) => `xlh:${addr}`;
   const remoteIds = new Set(remotes.map((r) => r.id));
+  const deviceOfRemote = new Map<string, string>(); // remote node id → device id
+  for (const d of remoteDevices) for (const m of d.members) deviceOfRemote.set(m.id, devId(d.device));
+  // In collapsed view a remote node is represented by its device card.
+  const glyphFor = (id: string) => (view.collapse ? deviceOfRemote.get(id) ?? id : id);
 
-  // Defaults for anything never dragged: lighthouses in a top row, nodes on a
-  // circle. Dragged glyphs are pinned by the `pos` state instead.
+  // ---------- default positions ----------
   const defaults = new Map<string, XY>();
   const lhSlots = lighthouses.length + extraLh.length;
   lighthouses.forEach((p, i) =>
@@ -123,30 +157,35 @@ export function TopologyGraph({
   extraLh.forEach((addr, j) =>
     defaults.set(xlhId(addr), { x: ((lighthouses.length + j + 1) * W) / (lhSlots + 1), y: 52 })
   );
-  // Local nodes on a circle, shifted left to make room for one column per remote device.
-  const COL_W = 118;
-  const cx = W / 2 - Math.min(2, remoteDevices.length) * 62, cy = 310, r = Math.min(185, 60 + nodes.length * 22);
+  // Local nodes on a circle, shifted left to make room for the remote devices.
+  const shift = remoteDevices.length ? (view.collapse ? 60 : Math.min(2, remoteDevices.length) * 62) : 0;
+  const cx = W / 2 - shift, cy = 310, r = Math.min(185, 60 + nodes.length * 22);
   nodes.forEach((p, i) => {
     const a = (2 * Math.PI * i) / nodes.length - Math.PI / 2;
     defaults.set(p.name, { x: cx + r * Math.cos(a), y: cy + r * Math.sin(a) });
   });
-  // One column per remote device on the right, headed by "device · IP".
+  const colX = (k: number) => W - 62 - (remoteDevices.length - 1 - k) * COL_W;
   remoteDevices.forEach((d, k) => {
-    const x = W - 62 - (remoteDevices.length - 1 - k) * COL_W;
+    // Collapsed: cards stacked down the right edge. Expanded: one column per device.
     const span = H - 210;
+    defaults.set(devId(d.device), { x: W - 75, y: 120 + ((k + 0.5) * span) / remoteDevices.length });
     d.members.forEach((m, j) => {
-      defaults.set(m.id, { x, y: 140 + ((j + 0.5) * span) / d.members.length });
+      defaults.set(m.id, { x: colX(k), y: 140 + ((j + 0.5) * span) / d.members.length });
     });
   });
 
   const getPos = (name: string): XY => pos[name] ?? defaults.get(name) ?? { x: cx, y: cy };
 
-  const procNames = new Set([...state.procs.map((p) => p.name), ...remotes.map((m) => m.id)]);
+  // ---------- routers (visual overlay) ----------
+  const glyphNames = new Set([
+    ...state.procs.map((p) => p.name),
+    ...(view.collapse ? remoteDevices.map((d) => devId(d.device)) : remotes.map((m) => m.id)),
+  ]);
   // Default router links name services ("aegis"); a fleet joined to other
   // machines runs as "aegis-<device>", so resolve link endpoints by service too.
   const byService = new Map<string, string>();
   for (const p of nodes) if (p.service && !byService.has(p.service)) byService.set(p.service, p.name);
-  const resolveEnd = (n: string) => (procNames.has(n) ? n : byService.get(n));
+  const resolveEnd = (n: string) => (glyphNames.has(n) ? n : byService.get(n) ?? (glyphNames.has(glyphFor(n)) ? glyphFor(n) : undefined));
   const routers = links
     .map(([a, b]) => [resolveEnd(a), resolveEnd(b)] as [string | undefined, string | undefined])
     .filter((l): l is Link => !!l[0] && !!l[1] && l[0] !== l[1])
@@ -217,16 +256,21 @@ export function TopologyGraph({
     } as React.CSSProperties,
   });
 
-  // Gossip web: an edge from each reachable observer to every peer it believes
-  // alive, deduped by unordered pair so A↔B is drawn once, not twice.
+  // ---------- gossip web ----------
+  // An edge from each reachable observer to every peer it believes alive,
+  // deduped by unordered pair so A↔B is drawn once. In collapsed view every
+  // edge to a remote node lands on its device card (and is deduped there too).
   const nodeNames = new Set(nodes.map((p) => p.name));
-  const edgeMap = new Map<string, { from: string; to: string }>();
-  for (const v of state.views) {
-    if (!v.reachable || !nodeNames.has(v.id)) continue;
-    for (const [peer, entry] of Object.entries(v.view)) {
-      if (entry.status !== "alive" || (!nodeNames.has(peer) && !remoteIds.has(peer))) continue;
-      const key = v.id < peer ? `${v.id} ${peer}` : `${peer} ${v.id}`;
-      if (!edgeMap.has(key)) edgeMap.set(key, { from: v.id, to: peer });
+  const edgeMap = new Map<string, { from: string; to: string; wan: boolean }>();
+  if (view.showLinks) {
+    for (const v of state.views) {
+      if (!v.reachable || !nodeNames.has(v.id)) continue;
+      for (const [peer, entry] of Object.entries(v.view)) {
+        if (entry.status !== "alive" || (!nodeNames.has(peer) && !remoteIds.has(peer))) continue;
+        const to = glyphFor(peer);
+        const key = v.id < to ? `${v.id} ${to}` : `${to} ${v.id}`;
+        if (!edgeMap.has(key)) edgeMap.set(key, { from: v.id, to, wan: remoteIds.has(peer) });
+      }
     }
   }
   const edges = [...edgeMap.values()];
@@ -235,8 +279,9 @@ export function TopologyGraph({
     return <div className="empty">No processes yet — boot the demo mesh or add servers.</div>;
   }
 
-  // One glyph renderer for local and remote nodes: colour is mesh consensus in
-  // both cases (consensus() walks the local views, which hold remote entries too).
+  // ---------- glyphs ----------
+  // One renderer for local and remote nodes: colour is mesh consensus in both
+  // cases (consensus() walks the local views, which hold remote entries too).
   const nodeGlyph = (id: string, service: string | undefined, running: boolean, remote?: RemoteMember) => {
     const at = getPos(id);
     const belief = consensus(state, id);
@@ -288,7 +333,66 @@ export function TopologyGraph({
         <text y={36} textAnchor="middle" fill="var(--muted)" fontSize={11}>
           {sys?.layer ?? service ?? ""}
         </text>
-        {/* device + IP live in the column header above; the tooltip repeats them */}
+      </g>
+    );
+  };
+
+  // One card per remote device: name, address, alive count, aggregate belief,
+  // and the threat engagement of its best-ranked member rolled up.
+  const deviceCard = (d: RemoteDevice) => {
+    const id = devId(d.device);
+    const at = getPos(id);
+    const belief = deviceBelief(d);
+    const memberIds = new Set(d.members.map((m) => m.id));
+    const primary = activeThreat && memberIds.has(activeThreat.primary ?? "") ? activeThreat.primary! : undefined;
+    const ranks = activeThreat ? activeThreat.fallbacks.map((f, i) => (memberIds.has(f) ? i : -1)).filter((i) => i >= 0) : [];
+    const fallbackRank = ranks.length ? Math.min(...ranks) : -1;
+    const fallbackId = fallbackRank >= 0 ? activeThreat!.fallbacks[fallbackRank] : undefined;
+    const CW = 124, CH = 62;
+    const services = d.members.map((m) => systemOf(m.id, m.service)?.short ?? m.service ?? m.id);
+    return (
+      <g key={id} transform={`translate(${at.x},${at.y})`} {...dragProps(id, at, () => clickGlyph(id))}>
+        <title>
+          {`${d.device} — ${d.members.length} node${d.members.length === 1 ? "" : "s"} at ${d.host}, ${d.alive} alive\n${d.members.map((m) => `${m.id}: ${m.status}`).join("\n")}\n(expand devices to see each node)`}
+        </title>
+        {linkFrom === id && (
+          <rect x={-CW / 2 - 6} y={-CH / 2 - 6} width={CW + 12} height={CH + 12} rx={14}
+            fill="none" stroke="var(--accent, #3E9BFF)" strokeWidth={2} strokeDasharray="3 3" />
+        )}
+        {primary && (
+          <>
+            <rect className="threat-ring-rect" x={-CW / 2 - 5} y={-CH / 2 - 5} width={CW + 10} height={CH + 10} rx={13}
+              fill="none" stroke="var(--suspect)" strokeWidth={2.5} />
+            <text y={-CH / 2 - 11} textAnchor="middle" fill="var(--suspect)" fontSize={11} fontWeight={700}>
+              ⚑ {activeThreat!.threat} · {systemName(primary)}
+            </text>
+          </>
+        )}
+        {!primary && fallbackRank >= 0 && (
+          <>
+            <rect x={-CW / 2 - 4} y={-CH / 2 - 4} width={CW + 8} height={CH + 8} rx={12}
+              fill="none" stroke="var(--suspect)" strokeOpacity={0.45} strokeWidth={1.5} strokeDasharray="5 4" />
+            <text x={CW / 2 - 2} y={-CH / 2 - 8} textAnchor="end" fill="var(--suspect)" fillOpacity={0.85} fontSize={10} fontWeight={700}>
+              {fallbackRank + 2} · {systemName(fallbackId!)}
+            </text>
+          </>
+        )}
+        <rect x={-CW / 2} y={-CH / 2} width={CW} height={CH} rx={10}
+          fill={COLOR[belief]} fillOpacity={0.14} stroke={COLOR[belief]} strokeWidth={2} />
+        <rect x={-CW / 2} y={-CH / 2} width={CW} height={CH} rx={10}
+          fill="none" stroke="var(--accent)" strokeOpacity={0.6} strokeWidth={1} strokeDasharray="2 4" />
+        <text textAnchor="middle" y={-CH / 2 + 17} fill="var(--text)" fontSize={12} fontWeight={700}>
+          ⟡ {d.device}
+        </text>
+        <text textAnchor="middle" y={-CH / 2 + 31} fill="var(--muted)" fontSize={9.5} fontFamily="Consolas, 'Cascadia Mono', monospace">
+          {d.host}
+        </text>
+        <text textAnchor="middle" y={-CH / 2 + 46} fill={COLOR[belief]} fontSize={10.5} fontWeight={700}>
+          {d.alive}/{d.members.length} alive
+        </text>
+        <text textAnchor="middle" y={-CH / 2 + 58} fill="var(--muted)" fontSize={8.5}>
+          {services.slice(0, 5).join(" · ")}{services.length > 5 ? " …" : ""}
+        </text>
       </g>
     );
   };
@@ -301,6 +405,15 @@ export function TopologyGraph({
           {linkMode ? "cancel" : "+ router"}
         </button>
         <button onClick={resetLayout}>reset layout</button>
+        <button className={view.collapse ? "toggle on" : "toggle"} title="one card per remote device, or one glyph per remote node"
+          onClick={() => setView((v) => ({ ...v, collapse: !v.collapse }))}
+          disabled={!remoteDevices.length}>
+          {view.collapse ? "⊞ expand devices" : "⊟ collapse devices"}
+        </button>
+        <button className={view.showLinks ? "toggle on" : "toggle"} title="show or hide the gossip links (who believes whom alive)"
+          onClick={() => setView((v) => ({ ...v, showLinks: !v.showLinks }))}>
+          {view.showLinks ? "links on" : "links off"}
+        </button>
         <span style={{ color: "var(--muted)", fontSize: 12 }}>
           {linkMode
             ? linkFrom
@@ -326,8 +439,7 @@ export function TopologyGraph({
 
         {edges.map((e, i) => {
           const a = getPos(e.from), b = getPos(e.to);
-          const wan = remoteIds.has(e.from) || remoteIds.has(e.to);
-          return wan ? (
+          return e.wan ? (
             <line key={i} x1={a.x} y1={a.y} x2={b.x} y2={b.y}
               stroke="var(--accent)" strokeOpacity={0.3} strokeWidth={1.5} strokeDasharray="3 5" />
           ) : (
@@ -386,21 +498,21 @@ export function TopologyGraph({
           );
         })}
 
-        {/* Device headers over each remote column */}
-        {remoteDevices.map((d, k) => {
-          const x = W - 62 - (remoteDevices.length - 1 - k) * COL_W;
-          return (
-            <g key={`dev-${d.device}`} transform={`translate(${x},100)`}>
-              <title>{`${d.device} — ${d.members.length} node${d.members.length === 1 ? "" : "s"} at ${d.host}, ${d.alive} alive`}</title>
-              <rect x={-COL_W / 2 + 6} y={-14} width={COL_W - 12} height={H - 150} rx={10}
-                fill="var(--accent)" fillOpacity={0.04} stroke="var(--accent)" strokeOpacity={0.25} strokeDasharray="4 4" />
-              <text textAnchor="middle" dy={2} fill="var(--accent)" fontSize={11} fontWeight={700}>⟡ {d.device}</text>
-              <text textAnchor="middle" y={14} fill="var(--muted)" fontSize={9.5}>{d.host}</text>
-            </g>
-          );
-        })}
+        {/* Expanded view: device headers over each remote column */}
+        {!view.collapse && remoteDevices.map((d, k) => (
+          <g key={`dev-${d.device}`} transform={`translate(${colX(k)},100)`}>
+            <title>{`${d.device} — ${d.members.length} node${d.members.length === 1 ? "" : "s"} at ${d.host}, ${d.alive} alive`}</title>
+            <rect x={-COL_W / 2 + 6} y={-14} width={COL_W - 12} height={H - 150} rx={10}
+              fill="var(--accent)" fillOpacity={0.04} stroke="var(--accent)" strokeOpacity={0.25} strokeDasharray="4 4" />
+            <text textAnchor="middle" dy={2} fill="var(--accent)" fontSize={11} fontWeight={700}>⟡ {d.device}</text>
+            <text textAnchor="middle" y={14} fill="var(--muted)" fontSize={9.5}>{d.host}</text>
+          </g>
+        ))}
+
         {nodes.map((p) => nodeGlyph(p.name, p.service, p.running))}
-        {remotes.map((m) => nodeGlyph(m.id, m.service, true, m))}
+        {view.collapse
+          ? remoteDevices.map((d) => deviceCard(d))
+          : remotes.map((m) => nodeGlyph(m.id, m.service, true, m))}
 
         <g transform={`translate(14,${H - 14})`} fontSize={11} fill="var(--muted)">
           <circle cx={4} r={5} fill="var(--alive)" fillOpacity={0.4} stroke="var(--alive)" />
@@ -418,7 +530,7 @@ export function TopologyGraph({
           <text x={588} dy={4}>engaging threat</text>
           {(remotes.length > 0 || extraLh.length > 0) && (
             <>
-              <circle cx={695} r={7} fill="none" stroke="var(--accent)" strokeDasharray="2 3" />
+              <rect x={688} y={-6} width={14} height={12} rx={3} fill="none" stroke="var(--accent)" strokeDasharray="2 3" />
               <text x={707} dy={4}>other device</text>
             </>
           )}

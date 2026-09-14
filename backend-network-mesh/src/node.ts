@@ -51,16 +51,18 @@ const LIGHTHOUSES = (args.lighthouses ?? "").split(",").filter(Boolean).map((s) 
 // (e.g. ACK_TIMEOUT_MS=1500 SUSPECT_TIMEOUT_MS=10000 for lossy internet paths).
 const envMs = (name: string, dflt: number) => { const v = Number(process.env[name]); return Number.isFinite(v) && v > 0 ? v : dflt; };
 const PROTOCOL_PERIOD_MS = envMs("PROTOCOL_PERIOD_MS", 1_000); // one probe per second (jittered ±10% to avoid lockstep)
-const ACK_TIMEOUT_MS = envMs("ACK_TIMEOUT_MS", 500); // direct probe considered failed after this
+const ACK_TIMEOUT_MS = envMs("ACK_TIMEOUT_MS", 600); // direct probe considered failed after this
 const INDIRECT_PROBES = 2; // helpers asked to probe on our behalf after a direct timeout
-const INDIRECT_TIMEOUT_MS = envMs("INDIRECT_TIMEOUT_MS", 500); // extra wait for a relayed ack before suspecting
+const INDIRECT_TIMEOUT_MS = envMs("INDIRECT_TIMEOUT_MS", 1_000); // extra wait for a relayed ack before suspecting (two internet hops each way when the helper is a relay)
 const SUSPECT_TIMEOUT_MS = envMs("SUSPECT_TIMEOUT_MS", 5_000); // base suspect → dead window; scaled up with mesh size
 const DEAD_PRUNE_MS = 30_000; // forget dead peers after this (bounds view + packet size)
 const ANNOUNCE_INTERVAL_MS = 30_000; // keepalive to lighthouses; the reply doubles as an anti-entropy refresh
 const REJOIN_MS = 10_000; // re-query lighthouses if our whole view has emptied
-const MAX_PIGGYBACK = 24; // rumors/peers per packet — keeps datagrams under the MTU
+const MAX_PIGGYBACK = 24; // peer records offered per packet before size trimming (see gossipPayload)
+const MAX_RUMORS_PER_PACKET = 8; // rumors are cheap but numerous; cap them so peer records still fit
 const RESURRECT_EVERY_TICKS = 5; // how often to ping one known-dead peer (false-conviction healing)
 const SAVE_PEERS_MS = 30_000; // persist known peer addresses for rejoin-after-restart
+const KEEPALIVE_MS = envMs("KEEPALIVE_MS", 8_000); // NAT keepalive to every peer on another machine (typical UDP NAT idle timeout ≥ 30 s)
 const PEERS_FILE = joinPath(tmpdir(), `mesh-peers-${args.id ?? "anon"}-${Number(args.port ?? 4001)}.json`);
 
 /** Suspect → dead window, scaled with view size like memberlist: rumors need
@@ -140,6 +142,11 @@ sock.on("message", (buf, rinfo) => {
 });
 
 function handleMessage(msg: Message, rinfo: { address: string; port: number }): void {
+  if (msg.type === "keepalive") {
+    // Refresh the sender's observed address; nothing else. Cheapest packet we have.
+    if (msg.from && typeof msg.from.id === "string" && msg.from.id) membership.upsertPeer(observed(msg.from, rinfo), true);
+    return;
+  }
   if (msg.type === "ping" || msg.type === "ping-req" || msg.type === "ack") {
     // Structural validation: without a sender id, a packet would register a
     // phantom peer keyed `undefined` that then spreads through gossip.
@@ -188,10 +195,7 @@ function handleMessage(msg: Message, rinfo: { address: string; port: number }): 
     case "ping": {
       absorb(msg.rumors, msg.peers);
       membership.upsertPeer(msg.from, true);
-      send(msg.from, {
-        type: "ack", seq: msg.seq, from: self,
-        ...gossipPayload(),
-      });
+      send(msg.from, withGossip({ type: "ack", seq: msg.seq, from: self }));
       break;
     }
     case "ping-req": {
@@ -207,10 +211,7 @@ function handleMessage(msg: Message, rinfo: { address: string; port: number }): 
         originSeq: msg.seq, targetId: target.id,
       });
       setTimeout(() => pendingProxies.delete(s), ACK_TIMEOUT_MS + 100);
-      send(target, {
-        type: "ping", seq: s, from: self,
-        ...gossipPayload(),
-      });
+      send(target, withGossip({ type: "ping", seq: s, from: self }));
       break;
     }
     case "ack": {
@@ -220,10 +221,7 @@ function handleMessage(msg: Message, rinfo: { address: string; port: number }): 
       const proxy = pendingProxies.get(msg.seq);
       if (proxy && proxy.targetId === msg.from.id) {
         pendingProxies.delete(msg.seq);
-        send(proxy.origin, {
-          type: "ack", seq: proxy.originSeq, from: msg.from, relayed: true,
-          ...gossipPayload(),
-        });
+        send(proxy.origin, withGossip({ type: "ack", seq: proxy.originSeq, from: msg.from, relayed: true }));
       }
       const pending = pendingAcks.get(msg.seq);
       // Only the node we actually probed may answer its probe.
@@ -401,17 +399,19 @@ function piggybackPeers(): PeerInfo[] {
   return all.slice(0, MAX_PIGGYBACK - 1).concat(self);
 }
 
-/** Rumors + peer addresses for one gossip packet, trimmed so the datagram never
- *  fragments (see MAX_DATAGRAM): peers go first (they are big, ~200 B each; a
- *  random sample still spreads every address over time), then rumors, and the
- *  packet always keeps our own record so receivers learn where we are. */
-function gossipPayload(): { rumors: Rumor[]; peers: PeerInfo[] } {
-  const rumors = membership.rumors(MAX_PIGGYBACK);
-  const probe = (ps: PeerInfo[], rs: Rumor[]): Message =>
-    ({ type: "ping-req", seq: 2 ** 31, from: self, target: self, rumors: rs, peers: ps }); // the largest shape
-  const peers = trimToFit(piggybackPeers(), (ps) => probe(ps, rumors), { min: 1 }); // self is last → kept
-  const fitRumors = trimToFit(rumors, (rs) => probe(peers, rs), { fromBack: true });
-  return { rumors: fitRumors, peers };
+/** Attach rumors + peer addresses to a gossip packet, sized so the datagram
+ *  never fragments (see MAX_DATAGRAM). Budget: at most MAX_RUMORS_PER_PACKET
+ *  rumors (least-recently-gossiped first, so every rumor still gets out), then
+ *  as many peer records (~200 B each) as fit in THIS message shape — a random
+ *  sample, so every address still spreads within a few packets. Our own record
+ *  is always kept so receivers learn where we are. Rumors must NOT crowd peers
+ *  out: a member known only by rumor has no address and can never be reached. */
+function withGossip(base: Record<string, unknown>): Message {
+  const rumors = membership.rumors(MAX_RUMORS_PER_PACKET);
+  const build = (ps: PeerInfo[], rs: Rumor[]): Message => ({ ...base, rumors: rs, peers: ps }) as Message;
+  const peers = trimToFit(piggybackPeers(), (ps) => build(ps, rumors), { min: 1 }); // self is last → kept
+  const fitRumors = trimToFit(rumors, (rs) => build(peers, rs), { fromBack: true, min: 1 });
+  return build(peers, fitRumors);
 }
 
 function send(to: { host: string; port: number }, msg: Message): void {
@@ -460,6 +460,17 @@ setInterval(() => {
   if (lh) send(lh, { type: "announce", node: self });
 }, ANNOUNCE_INTERVAL_MS);
 
+// NAT keepalive: peers on other machines only (loopback/LAN needs none). A
+// pair's mapping stays open as long as either side sends, so with 8 s here
+// nobody's direct probe ever meets a closed mapping.
+setInterval(() => {
+  const keep: Message = { type: "keepalive", from: self };
+  for (const p of membership.allPeers()) {
+    if (p.device === DEVICE) continue;
+    send(p, keep);
+  }
+}, KEEPALIVE_MS * (0.9 + Math.random() * 0.2));
+
 // ---------- SWIM protocol loop ----------
 let tick = 0;
 function protocolTick(): void {
@@ -485,10 +496,7 @@ function protocolTick(): void {
     const dead = membership.deadPeers();
     if (dead.length) {
       const d = dead[Math.floor(Math.random() * dead.length)];
-      send(d, {
-        type: "ping", seq: ++seq, from: self,
-        ...gossipPayload(),
-      });
+      send(d, withGossip({ type: "ping", seq: ++seq, from: self }));
     }
   }
 
@@ -507,10 +515,7 @@ function protocolTick(): void {
   }
   const target = candidates[Math.floor(Math.random() * candidates.length)];
   const s = ++seq;
-  send(target, {
-    type: "ping", seq: s, from: self,
-    ...gossipPayload(),
-  });
+  send(target, withGossip({ type: "ping", seq: s, from: self }));
   const timer = setTimeout(() => {
     // Direct probe failed. Before suspecting, ask a few peers to try their
     // path (SWIM's indirect probe) — one lossy link shouldn't convict a node.
@@ -520,17 +525,22 @@ function protocolTick(): void {
       membership.markSuspect(target.id);
       return;
     }
-    // Ask the target's own neighbours first: peers on the same device share its
-    // LAN/NAT and can reach it even when our path through a NAT is filtered.
-    // Random helpers only fill the remaining slots — this is what keeps a node
-    // behind a home router from being falsely suspected by nodes on the internet.
-    const near = sample(helpers.filter((p) => !!target.device && p.device === target.device), INDIRECT_PROBES);
-    const far = sample(helpers.filter((p) => !(!!target.device && p.device === target.device)), INDIRECT_PROBES);
-    for (const h of [...near, ...far].slice(0, INDIRECT_PROBES)) {
-      send(h, {
-        type: "ping-req", seq: s, from: self, target,
-        ...gossipPayload(),
-      });
+    // Mix the helpers so at least one of them can plausibly reach the target
+    // when we cannot:
+    //  - one on the target's own device (shares its LAN/NAT: reaches it even
+    //    when our path through a NAT is filtered);
+    //  - one elsewhere, publicly advertised relays first (reach everyone: the
+    //    only path when we and the target sit behind the SAME NAT and the
+    //    router does not hairpin, e.g. two laptops on one Wi-Fi).
+    // Random helpers fill whatever is left.
+    const sameDev = (p: PeerInfo) => !!target.device && p.device === target.device;
+    const near = sample(helpers.filter(sameDev), 1);
+    const relays = sample(helpers.filter((p) => !sameDev(p) && !!p.advertise), 1);
+    const rest = sample(helpers.filter((p) => !sameDev(p) && !p.advertise), INDIRECT_PROBES);
+    const chosen = new Map<string, PeerInfo>();
+    for (const h of [...near, ...relays, ...rest]) if (chosen.size < INDIRECT_PROBES) chosen.set(h.id, h);
+    for (const h of chosen.values()) {
+      send(h, withGossip({ type: "ping-req", seq: s, from: self, target }));
     }
     const indirectTimer = setTimeout(() => {
       pendingAcks.delete(s);

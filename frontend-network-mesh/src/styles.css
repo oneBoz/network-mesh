@@ -288,3 +288,13 @@ input:focus, select:focus { outline: none; border-color: var(--accent); }
 .device-name { color: var(--accent); font-weight: 700; }
 .device-ip { color: var(--text); font-family: Consolas, "Cascadia Mono", monospace; font-size: 11.5px; }
 .matrix-sub { color: var(--muted); font-weight: 400; font-size: 10px; line-height: 1.2; margin-top: 2px; }
+
+/* topology view toggles */
+button.toggle { color: var(--muted); }
+button.toggle.on { color: var(--text); border-color: var(--accent); }
+@keyframes threat-pulse-rect {
+  0% { stroke-opacity: 1; }
+  50% { stroke-opacity: 0.35; }
+  100% { stroke-opacity: 1; }
+}
+.threat-ring-rect { animation: threat-pulse-rect 1.1s ease-in-out infinite; }
