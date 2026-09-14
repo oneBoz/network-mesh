@@ -29,9 +29,37 @@ export interface ThreatAssignmentEvent {
 export interface ProcSpec {
   name: string;
   kind: ProcKind;
-  port: number; // UDP gossip port (lighthouse: its only port)
-  httpPort?: number; // node query API port
+  port: number; // UDP gossip port
+  httpPort?: number; // node: query API port; lighthouse: loopback registry API port
   service?: string;
+}
+
+/** One entry of a lighthouse's registry: a node that joined or announced recently. */
+export interface RegistryEntry {
+  id: string;
+  device?: string;
+  service?: string;
+  host: string; // observed (or advertised) address the lighthouse hands out
+  port: number;
+  httpPort?: number;
+  advertise?: string;
+  inc: number;
+  lastSeen: number;
+  ageMs: number;
+}
+
+/** A local lighthouse as seen through its registry API. */
+export interface LighthouseView {
+  name: string;
+  port: number;
+  reachable: boolean;
+  signing: boolean;
+  registered: number;
+  rejected: number; // packets dropped for a bad/missing signature or clock skew since start
+  joins: number;
+  uptimeMs: number;
+  staleMs: number;
+  entries: RegistryEntry[];
 }
 
 export interface ProcState extends ProcSpec {
@@ -106,6 +134,28 @@ export interface InboxMessage {
   consistent: boolean; // agree === seenBy.length
 }
 
+/** A point on the map: a device (all its nodes share it) or a named defended
+ *  asset (airbase, port…) with no node and no status. */
+export interface GeoEntry {
+  kind: "device" | "asset";
+  lat: number;
+  lng: number;
+  label?: string;
+}
+
+/**
+ * The location table. Owned by Command: every edit bumps `version`, is
+ * persisted by the control plane that made it, and is broadcast to the whole
+ * mesh as a `geo.locations` message; receivers keep the highest version
+ * (last writer wins) and persist it too. Keyed by device name or asset id.
+ */
+export interface GeoTable {
+  version: number;
+  updatedBy: string; // device that made the last edit
+  updatedAt: number;
+  entries: Record<string, GeoEntry>;
+}
+
 export interface MeshState {
   ts: number;
   device: string; // name of the machine this dashboard runs on (DEVICE_NAME)
@@ -115,6 +165,8 @@ export interface MeshState {
   remotes: RemoteMember[]; // members on other machines, derived from views
   extraLighthouses: string[]; // host:port of lighthouses on other machines (EXTRA_LIGHTHOUSES)
   messages: InboxMessage[]; // data-channel messages, most recent last, capped
+  geo: GeoTable; // locations of devices and defended assets (see GeoTable)
+  lighthouses: LighthouseView[]; // local lighthouses' registries (Lighthouse mode)
 }
 
 export interface LogEvent {

@@ -1,4 +1,4 @@
-import type { InboxMessage, LogEvent, MeshState, ThreatAssignmentEvent, ThreatType } from "./types";
+import type { GeoEntry, GeoTable, InboxMessage, LogEvent, MeshState, ThreatAssignmentEvent, ThreatType } from "./types";
 
 async function post(path: string, body?: unknown): Promise<unknown> {
   const r = await fetch(path, {
@@ -26,6 +26,21 @@ export const api = {
       throw new Error(data.error ?? `${r.status} ${r.statusText}`);
     }
   },
+  /** Location table: place/move a device or asset (persisted + broadcast), or remove one. */
+  placeGeo: async (id: string, entry: GeoEntry): Promise<GeoTable> => {
+    const r = await fetch(`/api/geo/${encodeURIComponent(id)}`, {
+      method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify(entry),
+    });
+    const data = (await r.json().catch(() => ({}))) as GeoTable & { error?: string };
+    if (!r.ok) throw new Error(data.error ?? `${r.status} ${r.statusText}`);
+    return data;
+  },
+  removeGeo: async (id: string): Promise<GeoTable> => {
+    const r = await fetch(`/api/geo/${encodeURIComponent(id)}`, { method: "DELETE" });
+    const data = (await r.json().catch(() => ({}))) as GeoTable & { error?: string };
+    if (!r.ok) throw new Error(data.error ?? `${r.status} ${r.statusText}`);
+    return data;
+  },
   /** GCS signal: a data-channel message flooded to every device; each node
    *  matchmakes it and the answer comes back with the stored message. */
   sendSignal: (threat: ThreatType, station: string, note?: string) =>
@@ -51,7 +66,8 @@ export function subscribe(
   onLog: (e: LogEvent) => void,
   onConnected?: (up: boolean) => void,
   onThreat?: (t: ThreatAssignmentEvent) => void,
-  onMessage?: (m: InboxMessage) => void
+  onMessage?: (m: InboxMessage) => void,
+  onGeo?: (g: GeoTable) => void
 ): () => void {
   const es = new EventSource("/api/events");
   es.addEventListener("state", (e) => {
@@ -61,6 +77,7 @@ export function subscribe(
   es.addEventListener("log", (e) => onLog(JSON.parse((e as MessageEvent).data)));
   es.addEventListener("threat", (e) => onThreat?.(JSON.parse((e as MessageEvent).data)));
   es.addEventListener("message", (e) => onMessage?.(JSON.parse((e as MessageEvent).data)));
+  es.addEventListener("geo", (e) => onGeo?.(JSON.parse((e as MessageEvent).data)));
   es.onerror = () => onConnected?.(false);
   return () => es.close();
 }

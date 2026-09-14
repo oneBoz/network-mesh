@@ -4,6 +4,7 @@ import type { InboxMessage, MeshState, ThreatAssignmentEvent, ThreatType } from 
 import { deviceOf, systemLabel, systemName, systemOf } from "./defense";
 import { SignalRow, fmtTime } from "./SignalsPanel";
 import { groupRemotes } from "./remotes";
+import { MapPanel } from "./MapPanel";
 
 const STATION_KEY = "mesh-gcs-station";
 const THREATS: { type: ThreatType; icon: string; hint: string }[] = [
@@ -165,6 +166,7 @@ export function GcsView({
       </div>
 
       <div className="gcs-col">
+        <MapPanel state={state} editable={false} height={280} />
         <div className="panel gcs-feed">
           <h2>Signals on the mesh — all stations, all devices <span className="remote-tag">live</span></h2>
           {signals.length ? (

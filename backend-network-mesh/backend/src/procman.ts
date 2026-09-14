@@ -87,6 +87,7 @@ export class ProcManager {
     const args = ["--import", "tsx", entry];
     if (spec.kind === "lighthouse") {
       args.push("--port", String(spec.port));
+      if (spec.httpPort) args.push("--http", String(spec.httpPort)); // loopback registry API for the dashboard
     } else {
       args.push("--id", spec.name, "--port", String(spec.port), "--http", String(spec.httpPort), "--device", DEVICE);
       if (ADVERTISE) args.push("--advertise", ADVERTISE);

@@ -71,10 +71,12 @@ resolve aegis via smartfalcon → aegis
 PASS
 ```
 
-### Two modes: Command and GCS
+### Three modes: Command, GCS, Lighthouse
 
-The header has a **Command / GCS** switch (also `?mode=gcs` in the URL). Both
-run on the same control plane, so one device can be both: open two tabs.
+The header has a **Command / GCS / Lighthouse** switch (also `?mode=gcs` or
+`?mode=lighthouse` in the URL). All run on the same control plane, so one
+device can be all three: open several tabs. The page scrolls; nothing is
+squeezed to fit one screen.
 
 - **Command** is the full picture: topology, convergence matrix, fleet
   controls, threat injection, live log, and a **GCS signals** feed showing every
@@ -83,6 +85,13 @@ run on the same control plane, so one device can be both: open two tabs.
   press a threat button, and the mesh decides. The **Latest engagement** card
   and the feed update live for *every* station's signals, including ones sent
   from other devices over the internet.
+- **Lighthouse** shows what this device's lighthouses see: each one's registry
+  (who is registered, from which device, the address it hands out, incarnation,
+  last seen), joins and **rejected packets** since start (someone knocking
+  with the wrong key), whether signing is on, and a log filtered to lighthouse
+  events — joins in green, moves and conflicts in yellow, rejections in red.
+  Each lighthouse exposes this on a loopback-only registry API
+  (`--http`, ports 9001+), never on the network.
 
 A signal is a data-channel message (`kind: gcs.signal`) originated by one local
 node and flooded across the mesh with a TTL, dedupe by id, and **relays first**:
@@ -106,6 +115,7 @@ and streams new messages over SSE.
 | `DEVICE_NAME` | `local-device` (Docker) / hostname (native) | Label for this machine on other devices' dashboards and on the signals it sends; also the id suffix when several devices boot the demo. |
 | `ADVERTISE` | empty | Public IP of *this* host. Only for a dashboard running on a VPS (see the host-network override). |
 | `MESH_PROFILE` | `local` | Timer preset: `local`, `internet`, or `mobile` for a phone hotspot / carrier NAT (longer ack and suspect windows, 5 s keepalive). |
+| `DATA_DIR` | `/data` (Docker) / `.data` (native) | Where the control plane persists the location table. |
 
 Sample data is built in: the 5 defense systems and their skill table live in
 [`backend-network-mesh/src/skills.ts`](backend-network-mesh/src/skills.ts);
@@ -186,6 +196,12 @@ The dashboard shows the other machine as a first-class member:
 - **Other devices** list in the fleet panel: address, service, consensus
   status and how many local observers see it. No kill or revive buttons, since
   you cannot crash someone else's process.
+- **Map** (Command mode): every device and defended asset from the location
+  table on a Singapore map (OpenStreetMap tiles). Pick a device or type a new
+  asset name in the side list, click the map to place it, drag to move, × to
+  remove an asset. Edits are persisted (Docker volume `mesh-data`) and
+  broadcast, so every device's map shows the same table within seconds; GCS
+  mode shows the map read-only.
 
 How it works and what it needs:
 

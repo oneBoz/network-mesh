@@ -7,6 +7,9 @@
 .env.*
 !.env.example
 
+# control-plane state when running natively (Docker uses the mesh-data volume)
+.data/
+
 # OS / editor junk
 .DS_Store
 Thumbs.db

@@ -10,15 +10,22 @@
  * these at 3 different sites and there is no single point of failure.
  *
  * Usage:
- *   npx tsx src/lighthouse.ts --port 5001
+ *   npx tsx src/lighthouse.ts --port 5001 [--http 9001]
+ *
+ * --http starts a loopback-only HTTP API for dashboards on the same machine:
+ *   GET /registry  → who is registered (observed address, device, last seen, incarnation)
+ *   GET /health    → { ok, port, signing, registered, rejected, uptimeMs }
  */
 import { createSocket } from "node:dgram";
+import { createServer } from "node:http";
 import { makeLogger, parseArgs } from "./cli.js";
 import type { PeerInfo } from "./protocol.js";
 import { decode, encode, observed, trimToFit } from "./protocol.js";
 
 const args = parseArgs(process.argv.slice(2));
 const PORT = Number(args.port ?? 5001);
+const HTTP_PORT = args.http && args.http !== "true" ? Number(args.http) : undefined;
+const STARTED = Date.now();
 const STALE_MS = 120_000; // forget peers not heard from in 2 minutes
 const MAX_REGISTRY = 1_000; // refuse new registrations beyond this — bounds memory on a flood
 const MAX_ACK_PEERS = 32; // peers per join-ack — keeps the datagram under the MTU
@@ -56,6 +63,7 @@ sock.on("error", (err) => {
 // needs to see ("who is knocking with the wrong key?").
 const lastDropLog = new Map<string, number>();
 let rejected = 0;
+let joins = 0; // join packets accepted since start (announces not counted)
 function onDrop(reason: string, from: string): void {
   rejected++;
   const now = Date.now();
@@ -113,7 +121,8 @@ sock.on("message", (buf, rinfo) => {
       if (err) log(`join-ack to ${rinfo.address}:${rinfo.port} failed: ${err.message}`);
     });
     if (msg.type === "join") {
-      log(`join: ${info.id} (${info.service ?? "no-svc"}) from ${rinfo.address}:${rinfo.port} → sent ${peers.length} peers`);
+      joins++;
+      log(`join: ${info.id} (${info.service ?? "no-svc"}${info.device ? `, ${info.device}` : ""}) from ${rinfo.address}:${rinfo.port} → sent ${peers.length} peers`);
     }
   } catch (err) {
     log(`dropped malformed packet from ${rinfo.address}:${rinfo.port}: ${(err as Error).message}`);
@@ -140,5 +149,28 @@ function freshPeers(): PeerInfo[] {
 }
 
 setInterval(freshPeers, 30_000); // periodic prune even with no traffic
+
+// ---------- loopback HTTP for the local dashboard ----------
+if (HTTP_PORT) {
+  createServer((req, res) => {
+    res.setHeader("content-type", "application/json");
+    const now = Date.now();
+    if (req.url === "/registry") {
+      freshPeers(); // prune first so the answer matches what join-acks would say
+      const entries = [...registry.values()].map((r) => ({
+        id: r.info.id, device: r.info.device, service: r.info.service,
+        host: r.info.host, port: r.info.port, httpPort: r.info.httpPort,
+        advertise: r.info.advertise, inc: r.inc, lastSeen: r.lastSeen, ageMs: now - r.lastSeen,
+      })).sort((a, b) => a.id.localeCompare(b.id));
+      res.end(JSON.stringify({ port: PORT, signing: !!process.env.MESH_KEY, registered: entries.length, rejected, joins, uptimeMs: now - STARTED, staleMs: STALE_MS, entries }));
+    } else if (req.url === "/health") {
+      res.end(JSON.stringify({ ok: true, port: PORT, signing: !!process.env.MESH_KEY, registered: registry.size, rejected, joins, uptimeMs: now - STARTED }));
+    } else {
+      res.statusCode = 404;
+      res.end(JSON.stringify({ error: "try /registry or /health" }));
+    }
+  }).on("error", (err) => log(`http server error: ${err.message}`))
+    .listen(HTTP_PORT, "127.0.0.1", () => log(`registry API on http://127.0.0.1:${HTTP_PORT}/registry (loopback only)`));
+}
 
 sock.bind(PORT, () => log(`lighthouse listening on udp/${PORT}${process.env.MESH_KEY ? " (HMAC signing ON — only holders of MESH_KEY can join)" : " (UNSIGNED — anyone can join; set MESH_KEY)"}`));

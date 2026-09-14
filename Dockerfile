@@ -36,8 +36,11 @@ ENV NODE_ENV=production \
 WORKDIR /app/backend-network-mesh
 COPY --from=backend  /app/backend-network-mesh   /app/backend-network-mesh
 COPY --from=frontend /app/frontend-network-mesh/dist /app/frontend-network-mesh/dist
-# Run as the unprivileged user the base image ships with.
-RUN chown -R node:node /app
+# Run as the unprivileged user the base image ships with. /data holds the
+# persisted location table (a named volume in compose); pre-create it owned by
+# node so the volume inherits writable ownership.
+RUN mkdir -p /data && chown -R node:node /app /data
+VOLUME ["/data"]
 USER node
 EXPOSE 7070/tcp 4001-4008/udp 5001-5003/udp
 HEALTHCHECK --interval=10s --timeout=3s --start-period=5s --retries=3 \

@@ -10,15 +10,27 @@ function colorFor(source: string): string {
   return PALETTE[Math.abs(h) % PALETTE.length];
 }
 
-/** Live stdout of every mesh process, streamed from the backend over SSE. */
-export function EventLog({ events }: { events: LogEvent[] }) {
+/** Colour a line by what it reports, so the important events stand out. */
+function lineClass(line: string): string | undefined {
+  if (/REJECTED|rejected packet|error/i.test(line)) return "log-bad";
+  if (/moved|id conflict|suspect → dead|→ suspect/.test(line)) return "log-warn";
+  if (/join:|joined mesh|→ alive|SIGNAL|adopted/.test(line)) return "log-good";
+  return undefined;
+}
+
+/** Live stdout of mesh processes, streamed from the backend over SSE.
+ *  `filter` narrows to some sources (e.g. only lighthouses). */
+export function EventLog({ events, title = "Live log", filter, height }: {
+  events: LogEvent[]; title?: string; filter?: (e: LogEvent) => boolean; height?: number;
+}) {
   const ref = useRef<HTMLDivElement>(null);
   const pinned = useRef(true); // autoscroll only while the user is at the bottom
+  const shown = filter ? events.filter(filter) : events;
 
   useEffect(() => {
     const el = ref.current;
     if (el && pinned.current) el.scrollTop = el.scrollHeight;
-  }, [events]);
+  }, [shown.length]);
 
   const onScroll = () => {
     const el = ref.current;
@@ -27,16 +39,18 @@ export function EventLog({ events }: { events: LogEvent[] }) {
 
   return (
     <div className="panel log-panel">
-      <h2>Live log</h2>
-      <div className="log" ref={ref} onScroll={onScroll}>
-        {events.map((e, i) => (
-          <div key={i}>
-            <span className="src" style={{ color: colorFor(e.source) }}>{e.source}</span>
-            {/* node.ts prefixes its own timestamp+id — strip them, the UI shows the source */}
-            <span>{e.line.replace(/^\[[^\]]*\] \[[^\]]*\] /, "")}</span>
-          </div>
-        ))}
-        {!events.length && <div style={{ color: "var(--muted)" }}>Waiting for events…</div>}
+      <h2>{title}</h2>
+      <div className="log" ref={ref} onScroll={onScroll} style={height ? { height } : undefined}>
+        {shown.map((e, i) => {
+          const text = e.line.replace(/^\[[^\]]*\] \[[^\]]*\] /, ""); // strip node.ts's own timestamp+id prefix
+          return (
+            <div key={i} className={lineClass(text)}>
+              <span className="src" style={{ color: colorFor(e.source) }}>{e.source}</span>
+              <span>{text}</span>
+            </div>
+          );
+        })}
+        {!shown.length && <div style={{ color: "var(--muted)" }}>Waiting for events…</div>}
       </div>
     </div>
   );

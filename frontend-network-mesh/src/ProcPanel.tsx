@@ -47,7 +47,7 @@ export function ProcPanel({ state, onError }: { state: MeshState; onError: (m: s
               {systemOf(p.name, p.service) ? `${systemOf(p.name, p.service)!.layer} · ` : ""}
               {p.kind === "node" && systemOf(p.name, p.service) && p.name !== p.service ? `${p.name} · ` : ""}
               {p.kind === "lighthouse"
-                ? `udp/${p.port}`
+                ? `udp/${p.port}${p.httpPort ? ` · registry http/${p.httpPort}` : ""}`
                 : `udp/${p.port} http/${p.httpPort}${p.service ? ` · ${p.service}` : ""}`}
               {p.pid && p.running ? ` · pid ${p.pid}` : ""}
             </span>

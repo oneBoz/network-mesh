@@ -21,6 +21,9 @@
  *   DELETE /api/procs/<name>           kill + forget
  *   GET    /api/resolve/<svc>?via=<id> service discovery through a live node
  *   POST   /api/threat                 {threat, via?} → inject a threat through a node
+ *   GET    /api/geo                    location table (devices + defended assets)
+ *   PUT    /api/geo/<id>               {kind, lat, lng, label?} → place/move; broadcast to the mesh
+ *   DELETE /api/geo/<id>               remove an entry; broadcast
  *   POST   /api/signal                 {threat, station?, note?, via?} → a GCS signal:
  *                                      sent as a data-channel message through one
  *                                      node, flooded to every device on the mesh;
@@ -40,7 +43,8 @@ import { createServer as createTcpServer } from "node:net";
 import { readFile, stat } from "node:fs/promises";
 import { extname, join, normalize } from "node:path";
 import { ADVERTISE, DEVICE, DEVICE_SLUG, ProcManager, ROOT } from "./procman.js";
-import type { InboxMessage, LogEvent, MeshState, NodeStatus, NodeView, ProcSpec, ProcState, RemoteMember, ThreatAssignmentEvent, ThreatType } from "./types.js";
+import { GeoStore } from "./geo.js";
+import type { InboxMessage, LighthouseView, LogEvent, MeshState, NodeStatus, NodeView, ProcSpec, ProcState, RemoteMember, ThreatAssignmentEvent, ThreatType } from "./types.js";
 
 const portFlag = process.argv.indexOf("--port");
 const PORT = portFlag !== -1 ? Number(process.argv[portFlag + 1]) : Number(process.env.PORT ?? 7070);
@@ -58,8 +62,16 @@ const DIST = process.env.FRONTEND_DIST ?? join(ROOT, "..", "frontend-network-mes
 
 // ---------- process manager + log fan-out ----------
 const sseClients = new Set<ServerResponse>();
+// Recent log lines, replayed to every new dashboard connection so a freshly
+// opened tab (or Lighthouse mode) shows what just happened, not an empty box.
+const MAX_LOG_HISTORY = 300;
+const logHistory: LogEvent[] = [];
 
 function broadcast(event: string, data: unknown): void {
+  if (event === "log") {
+    logHistory.push(data as LogEvent);
+    if (logHistory.length > MAX_LOG_HISTORY) logHistory.splice(0, logHistory.length - MAX_LOG_HISTORY);
+  }
   const frame = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
   for (const res of sseClients) res.write(frame);
 }
@@ -73,6 +85,48 @@ const procman = new ProcManager((source, line) => {
 // ---------- poller ----------
 const MAX_THREAT_HISTORY = 20;
 const recentThreats: ThreatAssignmentEvent[] = []; // most recent last, capped
+
+// ---------- location table ----------
+// Persisted under DATA_DIR (a named volume in Docker), broadcast as
+// `geo.locations`, adopted from the mesh when a newer version arrives.
+const DATA_DIR = process.env.DATA_DIR ?? join(ROOT, ".data");
+const geo = new GeoStore(DATA_DIR, DEVICE);
+const GEO_REBROADCAST_MS = 60_000;
+const GEO_REQUEST_MS = 15_000;
+let lastGeoRequest = 0;
+
+/** Send a data-channel message through any live local node (fire and forget). */
+async function sendViaLocalNode(kind: string, body: Record<string, unknown>): Promise<boolean> {
+  const nodes = procman.list().filter((p) => p.kind === "node" && p.running && p.httpPort);
+  const target = nodes[Math.floor(Math.random() * nodes.length)];
+  if (!target) return false;
+  try {
+    const r = await fetch(`http://127.0.0.1:${target.httpPort}/send`, {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ kind, body }), signal: AbortSignal.timeout(1_000),
+    });
+    return r.ok;
+  } catch {
+    return false;
+  }
+}
+
+function broadcastGeo(): void {
+  const t = geo.get();
+  if (t.version === 0) return;
+  void sendViaLocalNode("geo.locations", { table: t });
+  broadcast("geo", t);
+}
+
+// Re-broadcast periodically so late joiners converge even if the edit-time
+// broadcast was lost; ask the mesh for a table while we have none.
+setInterval(() => {
+  if (geo.get().version > 0) broadcastGeo();
+  else if (Date.now() - lastGeoRequest > GEO_REQUEST_MS) {
+    lastGeoRequest = Date.now();
+    void sendViaLocalNode("geo.locations.request", { from: DEVICE });
+  }
+}, GEO_REQUEST_MS);
 
 // ---------- data channel: merge every local node's inbox ----------
 const MAX_MESSAGES = 100;
@@ -96,6 +150,16 @@ async function pollInbox(node: string, httpPort: number): Promise<void> {
       inboxCursor.set(node, Math.max(inboxCursor.get(node) ?? 0, m.receivedAt));
       const existing = messageIndex.get(m.id);
       if (!existing) {
+        const housekeeping = m.kind === "geo.locations" || m.kind === "geo.locations.request";
+        if (housekeeping) {
+          messageIndex.set(m.id, { id: m.id, at: m.at, kind: m.kind, from: m.from, body: {}, receivedAt: m.receivedAt, seenBy: [node], agree: 1, consistent: true });
+          if (m.kind === "geo.locations" && geo.adopt((m.body as { table?: unknown }).table)) {
+            broadcast("geo", geo.get());
+            broadcast("log", { source: "backend", line: `adopted location table v${geo.get().version} from ${m.from.device ?? m.from.node}`, ts: Date.now() } satisfies LogEvent);
+          }
+          if (m.kind === "geo.locations.request" && geo.get().version > 0 && m.from.device !== DEVICE) broadcastGeo();
+          continue;
+        }
         const merged: InboxMessage = {
           id: m.id, at: m.at, kind: m.kind, from: m.from, to: m.to, body: m.body,
           assignment: m.assignment, receivedAt: m.receivedAt, seenBy: [node], agree: 1, consistent: true,
@@ -130,7 +194,7 @@ async function pollInbox(node: string, httpPort: number): Promise<void> {
 
 let lastState: MeshState = {
   ts: Date.now(), device: DEVICE, procs: [], views: [], threats: recentThreats,
-  remotes: [], extraLighthouses: procman.extraLighthouses(), messages,
+  remotes: [], extraLighthouses: procman.extraLighthouses(), messages, geo: geo.get(), lighthouses: [],
 };
 
 const RANK: Record<NodeStatus, number> = { alive: 0, suspect: 1, dead: 2 };
@@ -204,9 +268,11 @@ async function poll(): Promise<void> {
     )
   );
   await Promise.all(nodes.filter((n) => n.running && n.httpPort).map((n) => pollInbox(n.name, n.httpPort!)));
+  const lighthouses = await Promise.all(procs.filter((p) => p.kind === "lighthouse").map(pollLighthouse));
   lastState = {
     ts: Date.now(), device: DEVICE, procs, views, threats: recentThreats,
-    remotes: deriveRemotes(procs, views), extraLighthouses: procman.extraLighthouses(), messages,
+    remotes: deriveRemotes(procs, views), extraLighthouses: procman.extraLighthouses(), messages, geo: geo.get(),
+    lighthouses,
   };
   broadcast("state", lastState);
 }
@@ -274,7 +340,21 @@ async function allocLighthouseSpec(port: number | undefined): Promise<ProcSpec> 
   const procs = procman.list();
   const p = port ?? (await nextFree(procs.map((x) => x.port), 5001, udpBindable));
   if (procs.some((x) => x.port === p)) throw new Error(`port ${p} already in use`);
-  return { name: `lh-${p}`, kind: "lighthouse", port: p };
+  // Loopback registry API so Lighthouse mode can show who is registered.
+  const http = await nextFree(procs.map((x) => x.httpPort ?? 0), 9001, tcpBindable);
+  return { name: `lh-${p}`, kind: "lighthouse", port: p, httpPort: http };
+}
+
+async function pollLighthouse(p: ProcState): Promise<LighthouseView> {
+  const base: LighthouseView = { name: p.name, port: p.port, reachable: false, signing: false, registered: 0, rejected: 0, joins: 0, uptimeMs: 0, staleMs: 0, entries: [] };
+  if (!p.running || !p.httpPort) return base;
+  try {
+    const r = await fetch(`http://127.0.0.1:${p.httpPort}/registry`, { signal: AbortSignal.timeout(POLL_TIMEOUT_MS) });
+    const body = (await r.json()) as Omit<LighthouseView, "name" | "reachable">;
+    return { ...base, ...body, name: p.name, reachable: true };
+  } catch {
+    return base;
+  }
 }
 
 async function bootDemo(): Promise<void> {
@@ -361,6 +441,7 @@ const server = createServer(async (req, res) => {
         "cache-control": "no-cache",
         connection: "keep-alive",
       });
+      for (const e of logHistory) res.write(`event: log\ndata: ${JSON.stringify(e)}\n\n`);
       res.write(`event: state\ndata: ${JSON.stringify(lastState)}\n\n`);
       sseClients.add(res);
       const heartbeat = setInterval(() => res.write(": ping\n\n"), 15_000);
@@ -426,6 +507,26 @@ const server = createServer(async (req, res) => {
         procman.remove(name);
         return json(res, 200, { ok: true });
       }
+    }
+
+    // Location table: read, place/move, remove. Every edit is persisted here
+    // and broadcast to the mesh; other devices adopt it by version.
+    if (path === "/api/geo" && method === "GET") return json(res, 200, geo.get());
+    const geoMatch = path.match(/^\/api\/geo\/([^/]+)$/);
+    if (geoMatch && (method === "PUT" || method === "DELETE")) {
+      const id = decodeURIComponent(geoMatch[1]);
+      if (method === "DELETE") {
+        geo.remove(id);
+        broadcastGeo();
+        return json(res, 200, geo.get());
+      }
+      const body = await readJson(req);
+      const entry = { kind: body.kind, lat: Number(body.lat), lng: Number(body.lng), label: typeof body.label === "string" && body.label.trim() ? body.label.trim() : undefined };
+      if (!GeoStore.validEntry(entry)) return json(res, 400, { error: "entry needs kind (device|asset), lat, lng" });
+      geo.set(id, entry);
+      broadcastGeo();
+      broadcast("log", { source: "backend", line: `placed ${entry.kind} ${entry.label ?? id} at ${entry.lat.toFixed(4)}, ${entry.lng.toFixed(4)} (table v${geo.get().version})`, ts: Date.now() } satisfies LogEvent);
+      return json(res, 200, geo.get());
     }
 
     // GCS signal: a data-channel message originated by one local node and

@@ -17,7 +17,10 @@ services:
       EXTRA_LIGHTHOUSES: ${EXTRA_LIGHTHOUSES:-}
       DEVICE_NAME: ${DEVICE_NAME:-local-device}
       MESH_PROFILE: ${MESH_PROFILE:-local}   # local | internet | mobile (timers + keepalive preset)
+      DATA_DIR: /data                        # location table etc. persist across restarts (volume below)
       ADVERTISE: ${ADVERTISE:-}   # only when this host has a public IP and joins a lighthouse on itself
+    volumes:
+      - mesh-data:/data
     ports:
       - "127.0.0.1:7070:7070"          # dashboard + control API, http://localhost:7070
       - "4001-4008:4001-4008/udp"      # node gossip ports  (lets peers on other machines reach these nodes)
@@ -29,3 +32,6 @@ services:
       timeout: 3s
       retries: 3
       start_period: 5s
+
+volumes:
+  mesh-data:

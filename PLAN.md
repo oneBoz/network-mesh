@@ -285,3 +285,174 @@ device through gossip. Phase 3 then makes the dashboard multi-device.
 - **Windows-only surprises**: Hyper-V port exclusions (already probed by the
   control plane), Defender Firewall inbound UDP, path separators, no bash.
   CI on `windows-latest` from day 2 catches these early.
+
+---
+
+## 5. Extension: map, live trajectories, engagement lifecycle
+
+Added 2026-09-14. Goal: on the Command screen, place this device and every
+GCS on a map of Singapore; a GCS streams an incoming target's trajectory in
+real time to Command and to the GCSs in the fallback chain; everyone sees the
+trajectory on the map; the GCS that neutralises the target signals it to all
+nodes.
+
+### 5.0 Feasibility verdict
+
+Feasible with no change to the mesh's protocol shape. Everything below rides on
+what exists: the data channel (`msg` flood with TTL and dedupe, `kind` is
+free-form), the GCS signal with its deterministic assignment and fallback list,
+device identities, and the relay-first forwarding that already reaches devices
+behind any NAT. Three things are genuinely new and carry the risk:
+
+1. **Geography** — a map, a location table, an offline basemap.
+2. **A stream, not events** — trajectory updates at ~1 Hz per track. The flood
+   costs about (nodes × fan-out) small packets per update; at 15 nodes that is
+   ~60 packets/s per track, fine; at 100 nodes it is not, so the design keeps a
+   targeted-delivery option open.
+3. **A replicated state machine** — "who is engaging, who takes over" must be
+   computed identically on every node from the same inputs, exactly like
+   matchmaking is today, or the panels disagree. This is the part to design
+   carefully and test deterministically.
+
+Decisions taken (2026-09-14): tracks are **simulated in the GCS UI**; locations
+are **assigned centrally by Command**; **only the assigned GCS may neutralise,
+with automatic escalation** to the next fallback; the map uses **online tiles
+with a bundled offline fallback**.
+
+### 5.1 Locations (Command-owned table)
+
+- Model: `locations: { version: number; updatedBy: device; entries: Record<id, { kind: "device" | "asset"; lat; lng; label? }> }`.
+  One location per **device** (all its nodes share it; a GCS is a device), plus
+  named **defended assets** that the simulator can target.
+- Set in Command mode: a **place** mode on the map — click a device card, click
+  the map; drag to move; "use my location" via the browser geolocation API
+  for this device.
+- Distribution: Command broadcasts the whole table as `kind: "geo.locations"`
+  after every edit and every 60 s; receivers keep the highest `version`
+  (last-writer-wins). A device that boots asks with `geo.locations.request`;
+  any node holding a table answers. Two Command devices editing concurrently
+  is resolved by version; the UI shows who edited last.
+- Persistence: the control plane writes the table to its data directory
+  (`/data` in Docker, a named volume `mesh-data` added to the compose file) so
+  a Command restart does not lose it. This is the one cost of central
+  ownership; the gossiped alternative was rejected for simplicity.
+- Basemap: Leaflet (bundled via npm, not a CDN) with OpenStreetMap tiles when
+  reachable (attribution shown), falling back to a bundled GeoJSON of
+  Singapore's coastline and planning areas (~200 KB, from data.gov.sg,
+  Singapore Open Data Licence) rendered by Leaflet itself, so the same markers
+  and polylines work in both modes. Fallback triggers when the first tile
+  fails to load.
+
+### 5.2 Trajectory stream
+
+- **Simulator in the GCS UI**: pick a threat type (missile, swarm, aircraft —
+  EMP stays an area event), click an origin on the map, pick a target (a
+  defended asset or any device), set speed
+  (presets per threat: missile fast/straight, swarm slow/weaving, aircraft
+  medium/banking; EMP has no trajectory and stays a point event). Optional
+  scripted scenarios ("two swarms from the south-east") for a repeatable demo.
+- Messages (all on the existing data channel, sender = the GCS device):
+  - `track.detected` — creates the target: `{ trackId, threat, origin, target, speed, at }`. Carries the same semantics as today's `gcs.signal`, so every node runs matchmaking and stores the **assignment** (primary + fallbacks). The **responsible GCS** of a step is the device that runs the assigned defense-system node.
+  - `track.update` — `{ trackId, seq, t, lat, lng, alt?, heading, speed, eta? }` at 1 Hz (configurable, max 2 Hz). Receivers coalesce: keep only the highest `seq` per track; render at most one update per animation frame.
+  - `track.snapshot` — every 10 s, the last known state of every live track, for late joiners and lossy paths.
+  - `track.lost` — the simulator stopped or 15 s passed without an update.
+- Delivery: flood (as today) at first. If per-track packet cost becomes a
+  problem, add a `toDevices: string[]` field to `MeshMessage` so relays forward
+  only toward Command devices and the devices in the fallback chain; the
+  forwarding logic already knows every peer's device.
+- Rendering: polyline of received positions with a heading arrow at the head,
+  fading tail, ETA label, colour by threat; the engaging system's device gets
+  a pulsing ring (reusing the current threat ring), fallbacks numbered as now.
+- Time: positions are ordered by sender `seq`, never by wall clock; the display
+  uses receiver time for ageing. Clock skew therefore cannot reorder a track.
+
+### 5.3 Engagement lifecycle (replicated state machine)
+
+States per track: `detected → assigned → engaging → neutralised | lost`, with
+`escalated(k)` as a transition that moves the responsibility to fallback *k*.
+
+Rules, evaluated identically on every node from the message log plus
+membership:
+
+1. On `track.detected`: assignment = deterministic matchmaking (existing).
+   Responsible = device of `assignment.primary`.
+2. `track.engaging` (optional, from the responsible GCS when the operator
+   acknowledges) — purely informational, shown as "engaging" on every panel.
+3. **Escalation** happens when either
+   - the responsible node is convicted **dead** by the local view (membership is
+     already what drives today's fallback story), or
+   - `ENGAGE_TIMEOUT` (default 45 s, per threat) passes since the responsibility
+     started without `track.neutralised`, or
+   - the responsible GCS sends `track.handover`.
+   Responsibility moves to the next fallback whose node is alive. Every panel
+   shows the handover with the reason.
+4. `track.neutralised` — `{ trackId, by: device, at }`. **Authorisation**:
+   receivers accept it only if `from.device` is the current responsible
+   device; otherwise it is stored as *rejected* and shown as such (with a
+   Command-only `override: true` escape hatch that is logged loudly). On
+   acceptance the target is marked neutralised on every map, the track stops,
+   and the GCS panel's button turns into a confirmation.
+5. Agreement display: as with signals today, the dashboard counts how many
+   local nodes reached the same state; disagreement means views had not
+   converged and is shown, not hidden.
+
+Because the timeout in rule 3 depends on local clocks, nodes can disagree by
+a few hundred ms around the boundary; the agreement counter makes that visible
+and the handover message from the GCS resolves it explicitly.
+
+### 5.4 UI
+
+- **Command**: map panel replaces the top-right slot (topology stays); device
+  markers coloured by consensus status with name + IP; place mode; live
+  tracks; an **engagement timeline** listing detected / assigned / escalated /
+  neutralised events with device and time; click a track to focus.
+- **GCS**: map centred on this device; incoming tracks with the ones assigned
+  to *this device* highlighted; a big **NEUTRALISED** button enabled only while
+  this device is responsible (plus **hand over**); the scenario launcher; the
+  same timeline filtered to tracks involving this device.
+- Both keep the existing panels; the map is a new component fed from
+  `state.messages` reduced into `state.tracks` by the control plane.
+
+### 5.5 Work plan
+
+| Phase | Scope | Estimate |
+|---|---|---|
+| G1 | Location table, persistence volume, broadcast + request, map component with tiles and device markers, place mode | 1.5 days |
+| G2 | Track simulator, `track.*` messages, coalescing, snapshots, trajectory rendering on Command and GCS | 2 days |
+| G3 | Lifecycle reducer (shared TypeScript module used by node and control plane), escalation rules, authorised neutralise, timeline, agreement counter | 1.5 days |
+| G4 | Offline basemap fallback, scripted scenarios, `node:test` suite for the reducer (same message log ⇒ same states on every node), docs, judge demo script | 1 day |
+
+Order: G1 → G3's reducer (it can be tested without a map) → G2 → G4. The
+reducer first, because it is the part that must be right.
+
+### 5.6 Risks
+
+- **Flood rate.** Bounded by coalescing and 1 Hz; `toDevices` targeting is the
+  escape hatch. Measure packets/s on the VM with 3 concurrent tracks.
+- **Spoofing.** `from.device` is trusted because the shared key authenticates
+  every packet; anyone with the key can claim any device. Acceptable for the
+  hackathon; per-device identities (Phase 6) fix it properly.
+- **Location table loss.** Mitigated by the volume and by re-broadcasts; a
+  second Command device holds a copy.
+- **Map licensing/offline.** OSM attribution required; fallback GeoJSON must
+  ship in the image (add to the Dockerfile's frontend stage).
+- **Determinism.** Keep every lifecycle rule a pure function of (message log,
+  membership snapshot, now). Test it as such.
+
+### 5.7 Decided (2026-09-14)
+
+- **Update rate: 1 Hz.** Renderers interpolate between updates so motion still
+  looks smooth; the wire stays at one packet per track per second.
+- **Defended assets: yes.** Command places named assets (airbase, port, radar
+  site…) on the map; they live in the same location table as devices
+  (`entries[id] = { kind: "device" | "asset", lat, lng, label }`), are broadcast
+  and persisted the same way, and are the simulator's target choices along
+  with devices. Assets have no node and no status; they are what the fallback
+  chain is defending.
+- **Concurrent tracks: 3.** The simulator refuses a 4th live track; the
+  lifecycle reducer and the UI are sized for it (three colours, three
+  timelines). Raising it later is a constant, not a redesign.
+- **EMP: area event.** No trajectory; it stays the point signal it is today,
+  drawn as a pulsing circle at the reported position with the existing
+  assignment (WISL) and no engagement lifecycle beyond acknowledged /
+  neutralised.

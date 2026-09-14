@@ -79,6 +79,9 @@ http://127.0.0.1:7070 — by default from a sibling checkout at
     POST   /api/procs/<name>/start     revive a crashed process
     DELETE /api/procs/<name>           kill + forget
     GET    /api/resolve/<svc>?via=<id> service discovery through a live node
+    GET    /api/geo                    location table (devices + defended assets)
+    PUT    /api/geo/<id>               {kind, lat, lng, label?} → place or move; persisted, broadcast
+    DELETE /api/geo/<id>               remove; broadcast
     POST   /api/signal                 {threat, station?, note?, via?} → GCS signal:
                                        flooded to every device as a data-channel
                                        message; returns the stored message with the
@@ -91,6 +94,19 @@ The shapes returned by this API are defined in `backend/src/types.ts` — the
 frontend repo keeps a mirror in `src/types.ts`; update both when the contract
 changes.
 
+`MeshState.lighthouses` is each local lighthouse's registry, polled from its
+loopback `--http` API (the control plane allocates ports from 9001): entries
+with observed address, device, incarnation and age, plus joins and rejected
+packet counts. The SSE stream replays the last 300 log lines to a new client
+so a fresh tab is not empty.
+
+`MeshState.geo` is the location table: Command-owned, versioned, last writer
+wins. The control plane that edits it persists it under `DATA_DIR` and floods
+it as a `geo.locations` message; every other control plane adopts and persists
+a newer version, and a control plane with no table asks with
+`geo.locations.request` every 15 s. Those two kinds are housekeeping and never
+appear in the visible message list.
+
 `MeshState` also carries `remotes` and `extraLighthouses`: members that show
 up in the local nodes' views but are not processes of this dashboard (nodes on
 other machines that joined through a shared lighthouse). They are derived from
@@ -102,7 +118,7 @@ is the majority opinion of the local observers, ties broken pessimistically.
 Every process simulates one physical server. Ports stand in for machines, so you can run a whole "multi-site" fleet on one laptop — or spread the same commands across real machines by changing the lighthouse addresses.
 
     # terminal 1-3: lighthouses (your "3 sites")
-    npx tsx src/lighthouse.ts --port 5001
+    npx tsx src/lighthouse.ts --port 5001 --http 9001   # --http: loopback registry API (GET /registry, /health) for the dashboard
     npx tsx src/lighthouse.ts --port 5002
     npx tsx src/lighthouse.ts --port 5003
 

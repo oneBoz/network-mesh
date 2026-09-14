@@ -182,6 +182,44 @@ via a relay and probes them through helpers first, retrying direct every
 
 ---
 
+### 2026-09-14 (late) — Planned: map, trajectories, engagement lifecycle
+
+Decided and written up as `PLAN.md` §5: simulated tracks from the GCS UI,
+Command-owned location table (persisted, broadcast), assigned-GCS-only
+neutralise with automatic escalation, Leaflet + OSM tiles with a bundled
+Singapore GeoJSON fallback. Open questions closed: 1 Hz updates, Command
+places named defended assets too, at most 3 concurrent tracks, EMP stays an
+area event. Build order: locations → lifecycle reducer (with tests) → track
+stream + map → offline fallback and scenarios.
+
+### 2026-09-14 (late) — G1 built: location table + map
+
+- `backend/src/geo.ts`: persisted, versioned `GeoStore` (atomic file replace
+  under `DATA_DIR`; Docker volume `mesh-data` mounted at `/data`, pre-created
+  owned by `node` in the Dockerfile).
+- Control plane: `GET/PUT/DELETE /api/geo`, broadcast as `geo.locations` after
+  every edit and every 60 s, `geo.locations.request` every 15 s while empty,
+  adoption by version from other devices, SSE `geo` event, `MeshState.geo`.
+- Frontend: `MapPanel.tsx` (Leaflet 1.9.4 bundled via npm, OSM tiles darkened
+  to the theme, divIcon markers coloured by consensus status, assets as
+  diamonds). Command: place mode (pick item → click map, drag to move, remove
+  assets, new-asset input). GCS: read-only map above the feed. "tiles offline"
+  badge when the first tile fails — the bundled GeoJSON fallback is G4.
+- Verified: three entries placed on the Mac reached the VM's table (v3) within
+  2 s; the table survived a container restart via the volume.
+
+### 2026-09-15 — Lighthouse mode + spacious layout
+
+- `lighthouse.ts --http <port>`: loopback-only registry API (`/registry`,
+  `/health`) with joins/rejected counters; the control plane allocates 9001+
+  for every lighthouse it spawns and polls them into `MeshState.lighthouses`.
+- Third dashboard mode **Lighthouse** (`LighthouseView.tsx`): summary, one
+  card per lighthouse with its registry table, filtered and colour-coded log.
+- Control plane replays the last 300 log lines to each new SSE client.
+- Layout: the page scrolls instead of forcing everything into 100vh — sticky
+  header, two-column grid (3:2) with natural panel heights, no list caps, one
+  column under 1150 px. Topology height follows its viewBox.
+
 ## Verifying a build (checklist)
 
 ```sh

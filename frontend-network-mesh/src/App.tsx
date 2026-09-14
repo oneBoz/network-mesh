@@ -9,6 +9,8 @@ import { ThreatPanel } from "./ThreatPanel";
 import { SignalsPanel } from "./SignalsPanel";
 import { GcsView } from "./GcsView";
 import { EventLog } from "./EventLog";
+import { MapPanel } from "./MapPanel";
+import { LighthouseModeView } from "./LighthouseView";
 import { groupRemotes } from "./remotes";
 
 const MAX_LOG = 300;
@@ -21,14 +23,14 @@ const MODE_KEY = "mesh-mode";
  *  - gcs: a Ground Control Station screen that sends signals and shows what
  *    every station (this one and the others, on any device) is seeing.
  *  The same device can run both — open two tabs. */
-export type Mode = "command" | "gcs";
+export type Mode = "command" | "gcs" | "lighthouse";
 
 function initialMode(): Mode {
   const fromUrl = new URLSearchParams(location.search).get("mode");
-  if (fromUrl === "gcs" || fromUrl === "command") return fromUrl;
+  if (fromUrl === "gcs" || fromUrl === "command" || fromUrl === "lighthouse") return fromUrl;
   try {
     const saved = localStorage.getItem(MODE_KEY);
-    if (saved === "gcs" || saved === "command") return saved;
+    if (saved === "gcs" || saved === "command" || saved === "lighthouse") return saved;
   } catch { /* storage unavailable */ }
   return "command";
 }
@@ -50,6 +52,8 @@ export function signalToThreat(m: InboxMessage): ThreatAssignmentEvent | null {
 
 const EMPTY: MeshState = {
   ts: 0, device: "", procs: [], views: [], threats: [], remotes: [], extraLighthouses: [], messages: [],
+  geo: { version: 0, updatedBy: "", updatedAt: 0, entries: {} },
+  lighthouses: [],
 };
 
 export function App() {
@@ -89,7 +93,8 @@ export function App() {
       (m) => {
         const t = signalToThreat(m);
         if (t) highlight(t);
-      }
+      },
+      (g) => setState((prev) => (g.version > prev.geo.version ? { ...prev, geo: g } : prev))
     );
     return () => {
       clearInterval(flush);
@@ -122,6 +127,11 @@ export function App() {
             className={mode === "gcs" ? "on" : undefined} onClick={() => setMode("gcs")}>
             ◎ GCS
           </button>
+          <button role="tab" aria-selected={mode === "lighthouse"}
+            className={mode === "lighthouse" ? "on" : undefined} onClick={() => setMode("lighthouse")}
+            title="what this device's lighthouses see: registrations, moves, rejected packets">
+            ◇ Lighthouse
+          </button>
         </div>
         <div className="stats">
           {state.device && <span title="this machine (DEVICE_NAME)">on <b>{state.device}</b></span>}
@@ -150,6 +160,8 @@ export function App() {
 
       {mode === "gcs" ? (
         <GcsView state={state} activeThreat={activeThreat} onError={onError} />
+      ) : mode === "lighthouse" ? (
+        <LighthouseModeView state={state} events={events} />
       ) : (
         <div className="layout">
           <div className="col">
@@ -157,6 +169,7 @@ export function App() {
               <h2>Topology — consensus view</h2>
               <TopologyGraph state={state} activeThreat={activeThreat} />
             </div>
+            <MapPanel state={state} editable onError={onError} />
             <div className="panel">
               <h2>Convergence — who believes what</h2>
               <ConvergenceMatrix state={state} />
