@@ -1,5 +1,6 @@
 import type { InboxMessage, MeshState } from "./types";
 import { systemLabel } from "./defense";
+import { hostOfNode } from "./remotes";
 
 const sysName = systemLabel;
 const MAX_ROWS = 8;
@@ -11,6 +12,7 @@ export const fmtTime = (ts: number) =>
 export function SignalRow({ m, state, mine }: { m: InboxMessage; state: MeshState; mine?: boolean }) {
   const observers = state.views.filter((v) => v.reachable).length;
   const remote = !!m.from.device && !!state.device && m.from.device !== state.device;
+  const host = remote ? hostOfNode(state, m.from.node) : undefined;
   const a = m.assignment;
   return (
     <div className={`signal-row${mine ? " mine" : ""}`}>
@@ -19,7 +21,7 @@ export function SignalRow({ m, state, mine }: { m: InboxMessage; state: MeshStat
         <span className="threat-tag">{String(m.body.threat)}</span>
         <span className="signal-from">
           {m.from.station ?? m.from.node}
-          {m.from.device && <span className="signal-device"> @ {m.from.device}</span>}
+          {m.from.device && <span className="signal-device"> @ {m.from.device}{host ? ` (${host})` : ""}</span>}
           {remote && <span className="remote-tag" style={{ marginLeft: 6 }}>remote</span>}
           {mine && <span className="mine-tag">you</span>}
         </span>

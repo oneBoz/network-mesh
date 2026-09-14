@@ -3,6 +3,7 @@ import { api } from "./api";
 import type { InboxMessage, MeshState, ThreatAssignmentEvent, ThreatType } from "./types";
 import { deviceOf, systemLabel, systemName, systemOf } from "./defense";
 import { SignalRow, fmtTime } from "./SignalsPanel";
+import { groupRemotes } from "./remotes";
 
 const STATION_KEY = "mesh-gcs-station";
 const THREATS: { type: ThreatType; icon: string; hint: string }[] = [
@@ -45,6 +46,7 @@ export function GcsView({
 
   const liveNodes = state.procs.filter((p) => p.kind === "node" && p.running);
   const aliveRemotes = state.remotes.filter((r) => r.status === "alive");
+  const remoteDevices = groupRemotes(state.remotes);
   const signals = state.messages.filter((m) => m.kind === "gcs.signal");
   const latest: InboxMessage | undefined = signals.at(-1);
   const highlighted = activeThreat && latest && activeThreat.threatId === latest.id ? latest : latest;
@@ -76,9 +78,9 @@ export function GcsView({
           </div>
           <div className="gcs-status">
             <span><b>{liveNodes.length}</b> local nodes</span>
-            <span><b>{aliveRemotes.length}</b> remote devices
-              {aliveRemotes.length > 0 && (
-                <span className="muted"> ({aliveRemotes.map((r) => `${r.id}@${r.host}`).join(", ")})</span>
+            <span><b>{remoteDevices.length}</b> remote device{remoteDevices.length === 1 ? "" : "s"}
+              {remoteDevices.length > 0 && (
+                <span className="muted"> — {remoteDevices.map((d) => `${d.device} (${d.host}, ${d.alive}/${d.members.length} alive)`).join(" · ")}</span>
               )}
             </span>
             <span><b>{signals.length}</b> signals on the mesh</span>

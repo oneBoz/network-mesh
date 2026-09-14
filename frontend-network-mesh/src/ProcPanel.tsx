@@ -2,6 +2,7 @@ import { useState } from "react";
 import { api } from "./api";
 import type { MeshState, NodeStatus } from "./types";
 import { defenseTooltip, systemOf } from "./defense";
+import { groupRemotes } from "./remotes";
 
 const STATUS_COLOR: Record<NodeStatus, string> = {
   alive: "var(--alive)", suspect: "var(--suspect)", dead: "var(--dead)",
@@ -80,17 +81,25 @@ export function ProcPanel({ state, onError }: { state: MeshState; onError: (m: s
                 <span className="meta">{addr} · external join broker</span>
               </div>
             ))}
-            {state.remotes.map((r) => (
-              <div className="proc remote" key={r.id}
-                title={`${defenseTooltip(r.id, r.service) ?? r.id}\nlearned through gossip · incarnation ${r.inc} · votes alive ${r.votes.alive} / suspect ${r.votes.suspect} / dead ${r.votes.dead}`}>
-                <span className="dot" style={{ background: STATUS_COLOR[r.status] }} />
-                <span className="name">{systemOf(r.id, r.service)?.name ?? r.id}</span>
-                <span className="meta">
-                  {r.id} · {r.host}:{r.port}
-                  {" · "}<span style={{ color: STATUS_COLOR[r.status] }}>{r.status}</span>
-                  {` · seen by ${r.observers}/${observers}`}
-                </span>
-                <span className="remote-tag">remote</span>
+            {groupRemotes(state.remotes).map((d) => (
+              <div className="device-group" key={d.device}>
+                <div className="device-head" title={`${d.members.length} node${d.members.length === 1 ? "" : "s"} reached at ${d.host}`}>
+                  <span className="device-name">⟡ {d.device}</span>
+                  <span className="device-ip">{d.host}</span>
+                  <span className="muted">{d.alive}/{d.members.length} alive</span>
+                </div>
+                {d.members.map((r) => (
+                  <div className="proc remote" key={r.id}
+                    title={`${defenseTooltip(r.id, r.service) ?? r.id}\non ${d.device} at ${r.host}:${r.port}\nlearned through gossip · incarnation ${r.inc} · votes alive ${r.votes.alive} / suspect ${r.votes.suspect} / dead ${r.votes.dead}`}>
+                    <span className="dot" style={{ background: STATUS_COLOR[r.status] }} />
+                    <span className="name">{systemOf(r.id, r.service)?.name ?? r.id}</span>
+                    <span className="meta">
+                      {r.id} · udp/{r.port}
+                      {" · "}<span style={{ color: STATUS_COLOR[r.status] }}>{r.status}</span>
+                      {` · seen by ${r.observers}/${observers}`}
+                    </span>
+                  </div>
+                ))}
               </div>
             ))}
             {!state.remotes.length && (

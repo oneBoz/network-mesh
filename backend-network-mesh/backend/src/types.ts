@@ -43,7 +43,7 @@ export interface ViewEntry {
   status: NodeStatus;
   inc: number;
   since: number;
-  info?: { id: string; host: string; port: number; httpPort?: number; service?: string; skills?: Skills };
+  info?: { id: string; host: string; port: number; httpPort?: number; service?: string; skills?: Skills; device?: string; advertise?: string };
 }
 
 /** One node's opinion of the whole mesh, fetched from its /members API. */
@@ -61,6 +61,7 @@ export interface NodeView {
  *  consensus of the local observers, exactly like the topology colouring. */
 export interface RemoteMember {
   id: string;
+  device?: string; // machine name it reported (--device / DEVICE_NAME)
   host: string; // address the local nodes reach it at (public IP or advertised host)
   port: number;
   httpPort?: number;

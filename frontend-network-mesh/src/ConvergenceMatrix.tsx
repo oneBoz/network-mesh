@@ -1,4 +1,5 @@
 import type { MeshState } from "./types";
+import { remoteDevice } from "./remotes";
 
 const LETTER = { alive: "A", suspect: "S", dead: "D" } as const;
 
@@ -18,8 +19,8 @@ export function ConvergenceMatrix({ state }: { state: MeshState }) {
   if (nodeIds.length === 0 && remotes.length === 0) return null;
 
   const subjects = [
-    ...nodeIds.map((id) => ({ id, remote: undefined as string | undefined })),
-    ...remotes.map((r) => ({ id: r.id, remote: `${r.host}:${r.port}` })),
+    ...nodeIds.map((id) => ({ id, remote: undefined as string | undefined, device: undefined as string | undefined, host: undefined as string | undefined })),
+    ...remotes.map((r) => ({ id: r.id, remote: `${remoteDevice(r)} · ${r.host}:${r.port}`, device: remoteDevice(r), host: r.host })),
   ];
 
   return (
@@ -32,6 +33,7 @@ export function ConvergenceMatrix({ state }: { state: MeshState }) {
               <th key={s.id} className={s.remote ? "remote-col" : undefined}
                 title={s.remote ? `remote member on another machine · ${s.remote}` : undefined}>
                 {s.id}{s.remote ? " ⟡" : ""}
+                {s.remote && <div className="matrix-sub">{s.device}<br />{s.host}</div>}
               </th>
             ))}
           </tr>

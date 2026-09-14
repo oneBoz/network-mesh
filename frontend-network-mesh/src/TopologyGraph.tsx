@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import type { MeshState, NodeStatus, RemoteMember, ThreatAssignmentEvent } from "./types";
 import { consensus } from "./consensus";
 import { defenseTooltip, systemOf } from "./defense";
+import { groupRemotes, remoteDevice } from "./remotes";
 
 const COLOR: Record<NodeStatus | "unknown", string> = {
   alive: "var(--alive)",
@@ -107,6 +108,7 @@ export function TopologyGraph({
   // Members on other machines (learned via gossip) and the external lighthouses
   // they were reached through. Drawn as first-class glyphs, but read-only.
   const remotes = state.remotes;
+  const remoteDevices = groupRemotes(remotes);
   const extraLh = state.extraLighthouses;
   const xlhId = (addr: string) => `xlh:${addr}`;
   const remoteIds = new Set(remotes.map((r) => r.id));
@@ -121,20 +123,19 @@ export function TopologyGraph({
   extraLh.forEach((addr, j) =>
     defaults.set(xlhId(addr), { x: ((lighthouses.length + j + 1) * W) / (lhSlots + 1), y: 52 })
   );
-  // Local nodes on a circle, shifted left when remotes occupy the right column.
-  const cx = remotes.length ? W / 2 - 70 : W / 2, cy = 310, r = Math.min(185, 60 + nodes.length * 22);
+  // Local nodes on a circle, shifted left to make room for one column per remote device.
+  const COL_W = 118;
+  const cx = W / 2 - Math.min(2, remoteDevices.length) * 62, cy = 310, r = Math.min(185, 60 + nodes.length * 22);
   nodes.forEach((p, i) => {
     const a = (2 * Math.PI * i) / nodes.length - Math.PI / 2;
     defaults.set(p.name, { x: cx + r * Math.cos(a), y: cy + r * Math.sin(a) });
   });
-  // Remotes in a right-hand column; more than four zig-zag over two columns so
-  // their three-line labels do not overlap.
-  remotes.forEach((m, j) => {
-    const span = H - 200;
-    const twoCols = remotes.length > 4;
-    defaults.set(m.id, {
-      x: twoCols ? (j % 2 ? W - 60 : W - 150) : W - 75,
-      y: 120 + ((j + 0.5) * span) / remotes.length,
+  // One column per remote device on the right, headed by "device · IP".
+  remoteDevices.forEach((d, k) => {
+    const x = W - 62 - (remoteDevices.length - 1 - k) * COL_W;
+    const span = H - 210;
+    d.members.forEach((m, j) => {
+      defaults.set(m.id, { x, y: 140 + ((j + 0.5) * span) / d.members.length });
     });
   });
 
@@ -247,7 +248,7 @@ export function TopologyGraph({
         {...dragProps(id, at, () => clickGlyph(id))}>
         <title>
           {(defenseTooltip(id, service) ?? id) + (remote
-            ? `\nREMOTE — on another machine, reached over the internet at ${remote.host}:${remote.port}\nbelief: ${remote.status} (${remote.observers} local observers)`
+            ? `\nREMOTE — on ${remoteDevice(remote)}, reached over the internet at ${remote.host}:${remote.port}\nbelief: ${remote.status} (${remote.observers} local observers)`
             : "")}
         </title>
         {linkFrom === id && (
@@ -287,11 +288,7 @@ export function TopologyGraph({
         <text y={36} textAnchor="middle" fill="var(--muted)" fontSize={11}>
           {sys?.layer ?? service ?? ""}
         </text>
-        {remote && (
-          <text y={48} textAnchor="middle" fill="var(--accent)" fontSize={9.5}>
-            ⟡ {remote.host}
-          </text>
-        )}
+        {/* device + IP live in the column header above; the tooltip repeats them */}
       </g>
     );
   };
@@ -389,6 +386,19 @@ export function TopologyGraph({
           );
         })}
 
+        {/* Device headers over each remote column */}
+        {remoteDevices.map((d, k) => {
+          const x = W - 62 - (remoteDevices.length - 1 - k) * COL_W;
+          return (
+            <g key={`dev-${d.device}`} transform={`translate(${x},100)`}>
+              <title>{`${d.device} — ${d.members.length} node${d.members.length === 1 ? "" : "s"} at ${d.host}, ${d.alive} alive`}</title>
+              <rect x={-COL_W / 2 + 6} y={-14} width={COL_W - 12} height={H - 150} rx={10}
+                fill="var(--accent)" fillOpacity={0.04} stroke="var(--accent)" strokeOpacity={0.25} strokeDasharray="4 4" />
+              <text textAnchor="middle" dy={2} fill="var(--accent)" fontSize={11} fontWeight={700}>⟡ {d.device}</text>
+              <text textAnchor="middle" y={14} fill="var(--muted)" fontSize={9.5}>{d.host}</text>
+            </g>
+          );
+        })}
         {nodes.map((p) => nodeGlyph(p.name, p.service, p.running))}
         {remotes.map((m) => nodeGlyph(m.id, m.service, true, m))}
 

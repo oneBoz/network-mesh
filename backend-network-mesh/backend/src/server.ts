@@ -149,7 +149,7 @@ function deriveRemotes(procs: ProcState[], views: NodeView[]): RemoteMember[] {
       let r = acc.get(id);
       if (!r) {
         r = {
-          id, host: e.info.host, port: e.info.port, httpPort: e.info.httpPort,
+          id, device: e.info.device, host: e.info.host, port: e.info.port, httpPort: e.info.httpPort,
           service: e.info.service, skills: e.info.skills,
           status: e.status, inc: e.inc, since: e.since, observers: 0,
           votes: { alive: 0, suspect: 0, dead: 0 },
@@ -162,6 +162,7 @@ function deriveRemotes(procs: ProcState[], views: NodeView[]): RemoteMember[] {
       if (e.since < r.since) r.since = e.since;
       // Prefer the address held by an observer that currently reaches it.
       if (e.status === "alive") { r.host = e.info.host; r.port = e.info.port; }
+      if (!r.device && e.info.device) r.device = e.info.device;
     }
   }
   for (const r of acc.values()) {

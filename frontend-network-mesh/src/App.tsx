@@ -9,6 +9,7 @@ import { ThreatPanel } from "./ThreatPanel";
 import { SignalsPanel } from "./SignalsPanel";
 import { GcsView } from "./GcsView";
 import { EventLog } from "./EventLog";
+import { groupRemotes } from "./remotes";
 
 const MAX_LOG = 300;
 const THREAT_HIGHLIGHT_MS = 12_000; // engagement rings fade after this
@@ -105,6 +106,7 @@ export function App() {
   const lighthouses = state.procs.filter((p) => p.kind === "lighthouse");
   const liveLh = lighthouses.filter((p) => p.running).length;
   const aliveRemotes = state.remotes.filter((r) => r.status === "alive").length;
+  const remoteDevices = groupRemotes(state.remotes);
   const internet = state.remotes.length > 0 || state.extraLighthouses.length > 0;
 
   return (
@@ -127,7 +129,9 @@ export function App() {
           <span><b>{liveLh}</b>/{lighthouses.length} lighthouses</span>
           {internet && (
             <span title={`members on other machines, reached over the internet via ${state.extraLighthouses.join(", ") || "a shared lighthouse"}`}>
-              <b>{aliveRemotes}</b>/{state.remotes.length} remote <span className="remote-tag">internet</span>
+              <b>{aliveRemotes}</b>/{state.remotes.length} remote on <b>{remoteDevices.length}</b> device{remoteDevices.length === 1 ? "" : "s"}
+              {remoteDevices.length > 0 && <span className="muted"> ({remoteDevices.map((d) => d.device).join(", ")})</span>}
+              {" "}<span className="remote-tag">internet</span>
             </span>
           )}
           <span style={{ color: connected ? "var(--alive)" : "var(--dead)" }}>
