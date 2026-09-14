@@ -101,7 +101,7 @@ and streams new messages over SSE.
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `MESH_KEY` | `hackathon-demo-key` | Shared HMAC secret. Every process (local and remote) must match. Empty = unsigned mesh. |
+| `MESH_KEY` | placeholder | The mesh's access key: every packet is HMAC-signed with it and lighthouses/nodes reject anything else. Any value works locally; to join a real mesh get its key from the operator privately. Public lighthouses refuse to start without one. |
 | `EXTRA_LIGHTHOUSES` | empty | `host:port,host:port` of lighthouses on other machines. Every node the dashboard spawns joins them too. |
 | `DEVICE_NAME` | `local-device` (Docker) / hostname (native) | Label for this machine on other devices' dashboards and on the signals it sends; also the id suffix when several devices boot the demo. |
 | `ADVERTISE` | empty | Public IP of *this* host. Only for a dashboard running on a VPS (see the host-network override). |
@@ -128,7 +128,7 @@ cd frontend-network-mesh && npm ci && npm run build && cd ..
 
 # 2. run the control plane (serves the dashboard build from ../frontend-network-mesh/dist)
 cd backend-network-mesh && npm ci
-export MESH_KEY=hackathon-demo-key      # optional
+export MESH_KEY=<any value locally; the real key to join a mesh>   # optional
 npm run dev                             # → http://127.0.0.1:7070
 ```
 
@@ -150,7 +150,7 @@ a public IP and let every other machine join it. Nothing else changes.
 On the VPS (Docker installed, inbound **UDP 5001 and 4001** open):
 
 ```sh
-PUBLIC_IP=<vps public ip> MESH_KEY=hackathon-demo-key \
+PUBLIC_IP=<vps public ip> MESH_KEY=<a long random secret> \
   docker compose -f docker-compose.remote.yml up -d
 ```
 
@@ -159,7 +159,7 @@ default; override with `SITE_ID` / `SITE_SERVICE`). On every other machine,
 set in `.env`:
 
 ```
-MESH_KEY=hackathon-demo-key
+MESH_KEY=<the same secret>
 EXTRA_LIGHTHOUSES=<vps public ip>:5001
 ```
 

@@ -13,10 +13,19 @@ through gossip. Follow the section that matches where the new device is.
 - A `.env` in the repo root, copied from `.env.example`. Three lines matter:
 
 ```
-MESH_KEY=hackathon-demo-key          # identical on every device, or nothing talks
+MESH_KEY=<the mesh's private key>    # identical on every device, or nothing talks — see below
 EXTRA_LIGHTHOUSES=<host:port,...>    # who to join — see below
 DEVICE_NAME=<short unique name>      # e.g. mini-a, gcs-laptop; shows up on every other dashboard
 ```
+
+**Getting the key.** `MESH_KEY` is the access key: every packet is signed
+with it and the lighthouse drops anything else, logging the rejected source.
+It is deliberately not in the repository. Copy it from an existing device's
+`.env` and send it over a private channel (not git, not a screenshot in a
+public chat). Anyone without it sees `REJECTED packet ... bad HMAC signature`
+in the lighthouse log and never joins. If it ever leaks, rotate: generate a
+new one with `openssl rand -hex 32`, set it in every device's `.env`, and
+`docker compose up -d` everywhere.
 
 `DEVICE_NAME` must be unique across the mesh: it is also the suffix of the
 demo node ids (`aegis-mini-a`), and two devices with the same name would fight
@@ -72,14 +81,14 @@ Give it a public IP, open inbound UDP 5001-5003 and 4001-4010, install Docker,
 copy the repo, then either the lightweight site:
 
 ```sh
-PUBLIC_IP=<its ip> MESH_KEY=hackathon-demo-key DEVICE_NAME=<name> \
+PUBLIC_IP=<its ip> MESH_KEY=<the key> DEVICE_NAME=<name> \
   docker compose -f docker-compose.remote.yml up -d --build
 ```
 
 or the full dashboard with host networking:
 
 ```sh
-ADVERTISE=<its ip> DEVICE_NAME=<name> MESH_KEY=hackathon-demo-key \
+ADVERTISE=<its ip> DEVICE_NAME=<name> MESH_KEY=<the key> \
   docker compose -p mesh-dashboard -f docker-compose.yml -f docker-compose.host.yml up -d --build
 curl -s -X POST 127.0.0.1:7070/api/demo
 ```

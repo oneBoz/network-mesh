@@ -206,7 +206,7 @@ label (default hostname) that rides along in `from.device`.
 - **NAT keepalive.** Every 8 s (`KEEPALIVE_MS`) each node sends a tiny `keepalive` to every peer on another machine, so the NAT mapping for that pair never idles out and nobody's direct probe meets a closed mapping. Loopback/LAN peers get none.
 - **Device-aware indirect probes.** When a direct probe times out, the helpers asked to probe on our behalf are one peer on the target's own device (shares its LAN/NAT) plus one publicly advertised relay (reaches everyone — the only path between two devices behind the *same* home router, which usually does not hairpin), then random.
 - **Timer overrides.** `PROTOCOL_PERIOD_MS`, `ACK_TIMEOUT_MS`, `INDIRECT_TIMEOUT_MS`, `SUSPECT_TIMEOUT_MS` environment variables override the loopback defaults for lossy paths.
-- **Visible drops.** With `MESH_KEY` set, rejected frames log *why* (key mismatch, clock skew) instead of silently impersonating a dead peer.
+- **Visible drops.** With `MESH_KEY` set, rejected frames log *why* (key mismatch, clock skew) and *from where* (source address, throttled per source, with a running count on lighthouses) instead of silently impersonating a dead peer. `REQUIRE_MESH_KEY=1` makes a lighthouse refuse to start unsigned — set on every public lighthouse.
 - **Duplicate-ID guard.** A lighthouse refuses a join for an id that is actively registered from a different address — two machines can't fight an incarnation war over one identity.
 
 ## Known simplifications

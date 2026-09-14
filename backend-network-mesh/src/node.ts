@@ -119,17 +119,19 @@ sock.on("error", (err) => {
   if ((err as NodeJS.ErrnoException).code === "EADDRINUSE") process.exit(1);
 });
 
-// Throttled: a key/clock mismatch arrives at packet rate, one line per 5s is enough.
-let lastDropLog = 0;
-function onDrop(reason: string): void {
+// Throttled per source: a key/clock mismatch arrives at packet rate, one line
+// per source per 5 s is enough — with the source address, so a peer on the
+// wrong key is identifiable.
+const lastDropLog = new Map<string, number>();
+function onDrop(reason: string, from: string): void {
   const now = Date.now();
-  if (now - lastDropLog < 5_000) return;
-  lastDropLog = now;
-  log(`\x1b[33mdropping packets: ${reason}\x1b[0m`);
+  if (now - (lastDropLog.get(from) ?? 0) < 5_000) return;
+  lastDropLog.set(from, now);
+  log(`\x1b[33mrejected packet from ${from}: ${reason}\x1b[0m`);
 }
 
 sock.on("message", (buf, rinfo) => {
-  const msg = decode(buf, onDrop);
+  const msg = decode(buf, (reason) => onDrop(reason, `${rinfo.address}:${rinfo.port}`));
   if (!msg) return;
   // decode() only guarantees valid JSON, not a well-formed Message — a throw
   // here would be an uncaught exception that kills the process, so any packet

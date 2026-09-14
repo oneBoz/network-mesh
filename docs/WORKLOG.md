@@ -34,13 +34,13 @@ ssh azureuser@23.100.103.160
 Network security group `mesh-vpsNSG` allows inbound TCP 22, UDP 4001-4010,
 UDP 5001-5003. The code lives in `~/network-mesh` on the VM, copied with
 `rsync` (not a git clone); `~/network-mesh/.env` holds
-`PUBLIC_IP`, `MESH_KEY=hackathon-demo-key`, `DEVICE_NAME=azure-vm`.
+`PUBLIC_IP`, `MESH_KEY` (the private key, see below), `DEVICE_NAME=azure-vm`.
 
 Start / update the VM site (from the repo root on any machine that can SSH in):
 
 ```sh
 rsync -az --exclude node_modules --exclude .git --exclude dist --exclude .env --exclude .DS_Store ./ azureuser@23.100.103.160:~/network-mesh/
-ssh azureuser@23.100.103.160 'cd ~/network-mesh && ADVERTISE=23.100.103.160 DEVICE_NAME=azure-vm sudo -E docker compose -p mesh-dashboard -f docker-compose.yml -f docker-compose.host.yml up -d --build && curl -s -X POST 127.0.0.1:7070/api/demo'
+ssh azureuser@23.100.103.160 'cd ~/network-mesh && set -a && . ./.env && set +a && ADVERTISE=23.100.103.160 DEVICE_NAME=azure-vm sudo -E docker compose -p mesh-dashboard -f docker-compose.yml -f docker-compose.host.yml up -d --build && curl -s -X POST 127.0.0.1:7070/api/demo'
 ```
 
 Its dashboard is loopback-only; open it with `ssh -L 7070:127.0.0.1:7070 azureuser@23.100.103.160` then http://localhost:7070.
@@ -50,10 +50,17 @@ Cost control: `az vm deallocate -g mesh-rg -n mesh-vps` between sessions,
 "Azure for Students"; allowed regions are only indiasouthcentral, japaneast,
 centralindia, koreacentral, malaysiawest, and only arm64 B-series had capacity.
 
-### Shared secret
+### Shared secret (= access key to the mesh)
 
-Every device uses `MESH_KEY=hackathon-demo-key`. Change it everywhere at once
-or nothing talks.
+Every packet is HMAC-signed with `MESH_KEY`; the Azure lighthouse and every
+node drop anything signed with a different key and log the rejected source.
+The key is **not in the repo**: it lives only in each device's `.env` (Mac,
+mac02, and `~/network-mesh/.env` on the VM). Rotated on 2026-09-14 evening
+to a random 64-hex-char value generated with `openssl rand -hex 32`; the old
+`hackathon-demo-key` (which had been committed) no longer works. To get the
+key onto a new device, copy it from an existing device's `.env` out-of-band.
+Rotate by changing it on every device and restarting; the VPS compose files
+refuse to start without one (`REQUIRE_MESH_KEY`).
 
 ### Known open items
 
@@ -148,6 +155,11 @@ punching.
 Verified: Mac fleet and VM fleet see each other alive (10 nodes), GCS signals
 cross both ways with 5/5 agreement, false-suspicion rate dropped from ~35/min
 to single digits once the datagram cap went in (before `mac02` joined).
+
+**Access control.** Public lighthouses now require `MESH_KEY`
+(`REQUIRE_MESH_KEY=1` in the VPS compose files, which also fail to start with
+an empty key); rejected packets are logged per source address with a running
+count. Key rotated and removed from the repo.
 
 **Lessons worth remembering.**
 - Anything that works on loopback but flaps on the internet: check datagram

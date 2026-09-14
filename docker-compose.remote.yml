@@ -2,7 +2,7 @@
 # Linux VPS with a public IP to give the local demo real peers on another
 # network. Judges do NOT need this file; the local demo is self-contained.
 #
-#   PUBLIC_IP=203.0.113.10 MESH_KEY=hackathon-demo-key \
+#   PUBLIC_IP=203.0.113.10 MESH_KEY=<long random secret> \
 #     docker compose -f docker-compose.remote.yml up -d
 #
 # Then on every other machine set EXTRA_LIGHTHOUSES=203.0.113.10:5001 (with the
@@ -18,7 +18,8 @@ services:
     image: network-mesh:0.1.0
     network_mode: host
     environment:
-      MESH_KEY: ${MESH_KEY:-}
+      MESH_KEY: ${MESH_KEY:?set MESH_KEY — a public lighthouse must never run unsigned}
+      REQUIRE_MESH_KEY: "1"
     command: ["node", "--import", "tsx", "src/lighthouse.ts", "--port", "5001"]
     healthcheck: { disable: true }   # the image healthcheck probes the dashboard port, absent here
     restart: unless-stopped
@@ -28,7 +29,7 @@ services:
     network_mode: host
     depends_on: [lighthouse]
     environment:
-      MESH_KEY: ${MESH_KEY:-}
+      MESH_KEY: ${MESH_KEY:?set MESH_KEY — a public lighthouse must never run unsigned}
     command:
       - node
       - --import

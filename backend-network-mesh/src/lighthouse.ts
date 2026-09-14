@@ -26,6 +26,16 @@ const ID_CONFLICT_MS = 45_000; // a *fresh* registration at another address bloc
 
 const log = makeLogger(`lighthouse:${PORT}`);
 
+// A lighthouse on a public address is the mesh's front door. With MESH_KEY set,
+// every packet must carry a valid HMAC — an unsigned or wrongly signed join is
+// dropped and logged with its source address. REQUIRE_MESH_KEY=1 (set by the
+// VPS compose files) refuses to start unsigned at all, so a forgotten key can
+// never silently expose the mesh.
+if (process.env.REQUIRE_MESH_KEY && !process.env.MESH_KEY) {
+  log("REQUIRE_MESH_KEY is set but MESH_KEY is empty — refusing to run a public lighthouse unsigned");
+  process.exit(1);
+}
+
 interface Registered {
   info: PeerInfo;
   lastSeen: number;
@@ -40,17 +50,21 @@ sock.on("error", (err) => {
   if ((err as NodeJS.ErrnoException).code === "EADDRINUSE") process.exit(1);
 });
 
-// Throttled: a key/clock mismatch arrives at packet rate, one line per 5s is enough.
-let lastDropLog = 0;
-function onDrop(reason: string): void {
+// Throttled per source: a key/clock mismatch arrives at packet rate, one line
+// per source per 5 s is enough — and the source address is what an operator
+// needs to see ("who is knocking with the wrong key?").
+const lastDropLog = new Map<string, number>();
+let rejected = 0;
+function onDrop(reason: string, from: string): void {
+  rejected++;
   const now = Date.now();
-  if (now - lastDropLog < 5_000) return;
-  lastDropLog = now;
-  log(`dropping packets: ${reason}`);
+  if (now - (lastDropLog.get(from) ?? 0) < 5_000) return;
+  lastDropLog.set(from, now);
+  log(`\x1b[33mREJECTED packet from ${from}: ${reason} (${rejected} rejected so far)\x1b[0m`);
 }
 
 sock.on("message", (buf, rinfo) => {
-  const msg = decode(buf, onDrop);
+  const msg = decode(buf, (reason) => onDrop(reason, `${rinfo.address}:${rinfo.port}`));
   if (!msg) return; // unsigned/garbage — drop silently
   // decode() only guarantees valid JSON, not a well-formed Message: validate
   // the fields we use, and never let a throw escape (it would kill the process).
@@ -119,4 +133,4 @@ function freshPeers(): PeerInfo[] {
 
 setInterval(freshPeers, 30_000); // periodic prune even with no traffic
 
-sock.bind(PORT, () => log(`lighthouse listening on udp/${PORT}${process.env.MESH_KEY ? " (HMAC signing ON)" : ""}`));
+sock.bind(PORT, () => log(`lighthouse listening on udp/${PORT}${process.env.MESH_KEY ? " (HMAC signing ON — only holders of MESH_KEY can join)" : " (UNSIGNED — anyone can join; set MESH_KEY)"}`));
