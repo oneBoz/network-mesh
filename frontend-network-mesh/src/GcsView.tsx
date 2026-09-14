@@ -5,6 +5,7 @@ import { deviceOf, systemLabel, systemName, systemOf } from "./defense";
 import { SignalRow, fmtTime } from "./SignalsPanel";
 import { groupRemotes } from "./remotes";
 import { MapPanel } from "./MapPanel";
+import { TrackBadge, TrackControls, isLiveTrack, trackFor } from "./Engagement";
 
 const STATION_KEY = "mesh-gcs-station";
 const THREATS: { type: ThreatType; icon: string; hint: string }[] = [
@@ -49,6 +50,7 @@ export function GcsView({
   const aliveRemotes = state.remotes.filter((r) => r.status === "alive");
   const remoteDevices = groupRemotes(state.remotes);
   const signals = state.messages.filter((m) => m.kind === "gcs.signal");
+  const myLive = state.tracks.filter((t) => isLiveTrack(t) && t.responsibleDevice === state.device);
   const latest: InboxMessage | undefined = signals.at(-1);
   const highlighted = activeThreat && latest && activeThreat.threatId === latest.id ? latest : latest;
 
@@ -85,6 +87,7 @@ export function GcsView({
               )}
             </span>
             <span><b>{signals.length}</b> signals on the mesh</span>
+            <span style={myLive.length ? { color: "var(--suspect)", fontWeight: 700 } : undefined}><b>{myLive.length}</b> target{myLive.length === 1 ? "" : "s"} waiting on this station</span>
           </div>
         </div>
 
@@ -156,6 +159,12 @@ export function GcsView({
             ) : (
               <b className="threat-leaked" style={{ fontSize: 16 }}>NO COVERAGE — THREAT LEAKED</b>
             )}
+            {trackFor(state, highlighted.id) && (
+              <div className="signal-lifecycle" style={{ marginTop: 10 }}>
+                <TrackBadge t={trackFor(state, highlighted.id)!} state={state} />
+                <TrackControls t={trackFor(state, highlighted.id)!} state={state} station={stationName} onError={onError} />
+              </div>
+            )}
             <div className="muted" style={{ fontSize: 12, marginTop: 6 }}>
               {highlighted.consistent
                 ? `${highlighted.seenBy.length} local node${highlighted.seenBy.length === 1 ? "" : "s"} computed this identical answer independently`
@@ -172,7 +181,7 @@ export function GcsView({
           {signals.length ? (
             <div className="signal-list">
               {[...signals].reverse().map((m) => (
-                <SignalRow key={m.id} m={m} state={state} mine={myIds.has(m.id)} />
+                <SignalRow key={m.id} m={m} state={state} mine={myIds.has(m.id)} station={stationName} onError={onError} />
               ))}
             </div>
           ) : (

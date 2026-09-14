@@ -82,6 +82,8 @@ http://127.0.0.1:7070 — by default from a sibling checkout at
     GET    /api/geo                    location table (devices + defended assets)
     PUT    /api/geo/<id>               {kind, lat, lng, label?} → place or move; persisted, broadcast
     DELETE /api/geo/<id>               remove; broadcast
+    POST   /api/tracks/<id>/<action>   neutralise | handover | engaging, body {station?, note?, override?}
+                                       → lifecycle message from this device (see engagement.ts)
     POST   /api/signal                 {threat, station?, note?, via?} → GCS signal:
                                        flooded to every device as a data-channel
                                        message; returns the stored message with the
@@ -177,6 +179,21 @@ messages addressed to it (or broadcast) in a bounded inbox.
       -d '{"kind":"gcs.signal","station":"GCS-Alpha","body":{"threat":"swarm","note":"bearing 045"}}'
     curl -s localhost:8004/inbox                 # every node has it, with the SAME assignment
     curl -s -X POST localhost:8001/send -d '{"kind":"chat","to":"wisl","body":{"text":"hello"}}'
+
+## Engagement lifecycle
+
+`src/engagement.ts` is a pure reducer every node runs over the same messages
+(`gcs.signal`/`track.detected`, `track.update`, `track.engaging`,
+`track.handover`, `track.neutralised`, `track.lost`) plus its membership view.
+The ingesting node's ranked assignment is the chain of responsibility; the
+device running the responsible node is the only one whose lifecycle messages
+are accepted (`override: true` is Command's logged escape hatch). Escalation
+down the chain happens when the responsible node is dead (membership), the
+engage timeout passes (45 s missile, 60 s swarm/aircraft, 30 s emp;
+`ENGAGE_TIMEOUT_MS` overrides), or the responsible GCS hands over. Messages
+that arrive before their detection are queued and replayed. `GET /tracks` on a
+node returns its view; the control plane merges all local nodes' views and
+counts agreement. `npm test` runs the reducer suite (`node:test`).
 
 `kind: "gcs.signal"` is special: each receiving node runs threat matchmaking on
 `body.threat` and stores the assignment next to the message, so a Ground

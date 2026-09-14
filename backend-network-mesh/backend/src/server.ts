@@ -24,6 +24,9 @@
  *   GET    /api/geo                    location table (devices + defended assets)
  *   PUT    /api/geo/<id>               {kind, lat, lng, label?} → place/move; broadcast to the mesh
  *   DELETE /api/geo/<id>               remove an entry; broadcast
+ *   POST   /api/tracks/<id>/<action>   action ∈ neutralise | handover | engaging, body {station?, note?, override?}
+ *                                      → lifecycle message from this device; only the
+ *                                      responsible device is accepted (override = Command)
  *   POST   /api/signal                 {threat, station?, note?, via?} → a GCS signal:
  *                                      sent as a data-channel message through one
  *                                      node, flooded to every device on the mesh;
@@ -44,7 +47,7 @@ import { readFile, stat } from "node:fs/promises";
 import { extname, join, normalize } from "node:path";
 import { ADVERTISE, DEVICE, DEVICE_SLUG, ProcManager, ROOT } from "./procman.js";
 import { GeoStore } from "./geo.js";
-import type { InboxMessage, LighthouseView, LogEvent, MeshState, NodeStatus, NodeView, ProcSpec, ProcState, RemoteMember, ThreatAssignmentEvent, ThreatType } from "./types.js";
+import type { InboxMessage, LighthouseView, LogEvent, MeshState, NodeStatus, NodeView, ProcSpec, ProcState, RemoteMember, ThreatAssignmentEvent, ThreatType, Track, TrackView } from "./types.js";
 
 const portFlag = process.argv.indexOf("--port");
 const PORT = portFlag !== -1 ? Number(process.argv[portFlag + 1]) : Number(process.env.PORT ?? 7070);
@@ -194,7 +197,7 @@ async function pollInbox(node: string, httpPort: number): Promise<void> {
 
 let lastState: MeshState = {
   ts: Date.now(), device: DEVICE, procs: [], views: [], threats: recentThreats,
-  remotes: [], extraLighthouses: procman.extraLighthouses(), messages, geo: geo.get(), lighthouses: [],
+  remotes: [], extraLighthouses: procman.extraLighthouses(), messages, geo: geo.get(), lighthouses: [], tracks: [],
 };
 
 const RANK: Record<NodeStatus, number> = { alive: 0, suspect: 1, dead: 2 };
@@ -269,10 +272,11 @@ async function poll(): Promise<void> {
   );
   await Promise.all(nodes.filter((n) => n.running && n.httpPort).map((n) => pollInbox(n.name, n.httpPort!)));
   const lighthouses = await Promise.all(procs.filter((p) => p.kind === "lighthouse").map(pollLighthouse));
+  const tracks = await pollTracks(nodes.filter((n) => n.running && n.httpPort));
   lastState = {
     ts: Date.now(), device: DEVICE, procs, views, threats: recentThreats,
     remotes: deriveRemotes(procs, views), extraLighthouses: procman.extraLighthouses(), messages, geo: geo.get(),
-    lighthouses,
+    lighthouses, tracks,
   };
   broadcast("state", lastState);
 }
@@ -343,6 +347,33 @@ async function allocLighthouseSpec(port: number | undefined): Promise<ProcSpec> 
   // Loopback registry API so Lighthouse mode can show who is registered.
   const http = await nextFree(procs.map((x) => x.httpPort ?? 0), 9001, tcpBindable);
   return { name: `lh-${p}`, kind: "lighthouse", port: p, httpPort: http };
+}
+
+/** Merge every local node's lifecycle view: first report wins for display,
+ *  agreement = nodes whose (state, responsible, escalation count) match it. */
+async function pollTracks(nodes: ProcState[]): Promise<TrackView[]> {
+  const per = await Promise.all(nodes.map(async (n) => {
+    try {
+      const r = await fetch(`http://127.0.0.1:${n.httpPort}/tracks`, { signal: AbortSignal.timeout(POLL_TIMEOUT_MS) });
+      return { node: n.name, tracks: ((await r.json()) as { tracks: Track[] }).tracks };
+    } catch {
+      return { node: n.name, tracks: [] as Track[] };
+    }
+  }));
+  const merged = new Map<string, TrackView>();
+  for (const { node, tracks } of per) {
+    for (const t of tracks) {
+      const cur = merged.get(t.trackId);
+      if (!cur) { merged.set(t.trackId, { ...t, seenBy: [node], agree: 1, consistent: true }); continue; }
+      cur.seenBy.push(node);
+      const same = t.state === cur.state && t.responsibleNode === cur.responsibleNode && t.escalations.length === cur.escalations.length;
+      if (same) cur.agree++;
+      cur.consistent = cur.agree === cur.seenBy.length;
+      // Prefer the most advanced knowledge for display-only fields.
+      if (t.positions.length > cur.positions.length) cur.positions = t.positions;
+    }
+  }
+  return [...merged.values()].sort((a, b) => b.detectedAt - a.detectedAt);
 }
 
 async function pollLighthouse(p: ProcState): Promise<LighthouseView> {
@@ -527,6 +558,32 @@ const server = createServer(async (req, res) => {
       broadcastGeo();
       broadcast("log", { source: "backend", line: `placed ${entry.kind} ${entry.label ?? id} at ${entry.lat.toFixed(4)}, ${entry.lng.toFixed(4)} (table v${geo.get().version})`, ts: Date.now() } satisfies LogEvent);
       return json(res, 200, geo.get());
+    }
+
+    // Engagement lifecycle actions: sent as data-channel messages from a local
+    // node, so `from.device` is this device — the reducer on every node decides
+    // whether this device was allowed to act.
+    const trackMatch = path.match(/^\/api\/tracks\/([^/]+)\/(neutralise|handover|engaging)$/);
+    if (trackMatch && method === "POST") {
+      const [, rawId, action] = trackMatch;
+      const trackId = decodeURIComponent(rawId);
+      const body = await readJson(req);
+      const kind = action === "neutralise" ? "track.neutralised" : `track.${action}`;
+      const nodes = procman.list().filter((p) => p.kind === "node" && p.running && p.httpPort);
+      const target = nodes[Math.floor(Math.random() * nodes.length)];
+      if (!target) return json(res, 503, { error: "no live node to send through" });
+      const payload: Record<string, unknown> = { trackId };
+      if (typeof body.note === "string" && body.note.trim()) payload.note = body.note.trim();
+      if (body.override === true) payload.override = true;
+      const station = typeof body.station === "string" && body.station.trim() ? body.station.trim() : undefined;
+      const r = await fetch(`http://127.0.0.1:${target.httpPort}/send`, {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ kind, station, body: payload }), signal: AbortSignal.timeout(1_000),
+      });
+      const answer = (await r.json()) as Record<string, unknown>;
+      if (!r.ok) return json(res, r.status, answer);
+      broadcast("log", { source: "backend", line: `${action} on track ${trackId} sent as ${station ?? DEVICE}${body.override ? " (Command override)" : ""}`, ts: Date.now() } satisfies LogEvent);
+      return json(res, 200, { via: target.name, ...answer });
     }
 
     // GCS signal: a data-channel message originated by one local node and

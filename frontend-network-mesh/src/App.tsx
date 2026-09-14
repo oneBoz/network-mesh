@@ -11,6 +11,7 @@ import { GcsView } from "./GcsView";
 import { EventLog } from "./EventLog";
 import { MapPanel } from "./MapPanel";
 import { LighthouseModeView } from "./LighthouseView";
+import { TimelinePanel } from "./Engagement";
 import { groupRemotes } from "./remotes";
 
 const MAX_LOG = 300;
@@ -53,7 +54,7 @@ export function signalToThreat(m: InboxMessage): ThreatAssignmentEvent | null {
 const EMPTY: MeshState = {
   ts: 0, device: "", procs: [], views: [], threats: [], remotes: [], extraLighthouses: [], messages: [],
   geo: { version: 0, updatedBy: "", updatedAt: 0, entries: {} },
-  lighthouses: [],
+  lighthouses: [], tracks: [],
 };
 
 export function App() {
@@ -93,6 +94,11 @@ export function App() {
       (m) => {
         const t = signalToThreat(m);
         if (t) highlight(t);
+        // A neutralised (or lost) target stops glowing on the topology.
+        if ((m.kind === "track.neutralised" || m.kind === "track.lost") && typeof m.body.trackId === "string") {
+          const id = m.body.trackId;
+          setActiveThreat((cur) => (cur && cur.threatId === id ? null : cur));
+        }
       },
       (g) => setState((prev) => (g.version > prev.geo.version ? { ...prev, geo: g } : prev))
     );
@@ -176,7 +182,8 @@ export function App() {
             </div>
           </div>
           <div className="col">
-            <SignalsPanel state={state} />
+            <SignalsPanel state={state} onError={onError} />
+            <TimelinePanel state={state} />
             <ProcPanel state={state} onError={onError} />
             <ThreatPanel state={state} activeThreat={activeThreat} onError={onError} />
             <ResolvePanel state={state} />

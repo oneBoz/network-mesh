@@ -41,6 +41,10 @@ export const api = {
     if (!r.ok) throw new Error(data.error ?? `${r.status} ${r.statusText}`);
     return data;
   },
+  /** Engagement lifecycle action on a track. Only the responsible device is accepted
+   *  by the mesh (override = Command); the reducer on every node decides. */
+  trackAction: (trackId: string, action: "neutralise" | "handover" | "engaging", opts: { station?: string; note?: string; override?: boolean } = {}) =>
+    post(`/api/tracks/${encodeURIComponent(trackId)}/${action}`, opts),
   /** GCS signal: a data-channel message flooded to every device; each node
    *  matchmakes it and the answer comes back with the stored message. */
   sendSignal: (threat: ThreatType, station: string, note?: string) =>

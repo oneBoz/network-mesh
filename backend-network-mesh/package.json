@@ -13,7 +13,8 @@
     "typecheck": "tsc --noEmit",
     "demo": "bash scripts/demo.sh",
     "dev": "tsx backend/src/server.ts",
-    "backend": "tsx backend/src/server.ts"
+    "backend": "tsx backend/src/server.ts",
+    "test": "node --import tsx --test test/*.test.ts"
   },
   "devDependencies": {
     "@types/node": "22.20.1",

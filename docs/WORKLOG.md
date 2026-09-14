@@ -220,6 +220,24 @@ stream + map → offline fallback and scenarios.
   header, two-column grid (3:2) with natural panel heights, no list caps, one
   column under 1150 px. Topology height follows its viewBox.
 
+### 2026-09-15 — G3 built: engagement lifecycle
+
+- `src/engagement.ts`: pure reducer (detected → engaging → neutralised | lost;
+  escalation on dead/timeout/handover; responsible-device authorisation with
+  Command override; out-of-order queueing; position updates for G2).
+  `test/engagement.test.ts`: 10 tests incl. determinism across interleavings.
+  `npm test` in backend-network-mesh.
+- Node: applies lifecycle messages at ingest, ticks every protocol period,
+  `GET /tracks`. Control plane: merges `/tracks` across local nodes with an
+  agreement count into `MeshState.tracks`; `POST /api/tracks/<id>/<action>`.
+- Dashboard: lifecycle badge + ENGAGE / NEUTRALISED / hand over controls on
+  signal rows and the GCS engagement card (enabled only when this device is
+  responsible; Command gets a logged override), Engagement timeline panel,
+  topology ring cleared on neutralise.
+- Verified Mac ↔ Azure: unauthorised neutralise rejected, authorised accepted
+  (5/5 agree both sides), killing the responsible node escalated to the Mac
+  in ~10 s, handover moved responsibility across devices.
+
 ## Verifying a build (checklist)
 
 ```sh

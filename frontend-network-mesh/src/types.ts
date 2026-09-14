@@ -159,6 +159,38 @@ export interface GeoTable {
   entries: Record<string, GeoEntry>;
 }
 
+
+/** Engagement lifecycle of one target, as computed by a node (see src/engagement.ts). */
+export type TrackState = "detected" | "engaging" | "neutralised" | "lost";
+export interface TrackPosition { seq: number; t: number; lat: number; lng: number; alt?: number; heading?: number; speed?: number; eta?: number }
+export interface Track {
+  trackId: string;
+  threat: ThreatType;
+  detectedAt: number;
+  origin: { node: string; device?: string; station?: string };
+  note?: string;
+  chain: string[]; // ranked node ids, primary first
+  responsibleIndex: number;
+  responsibleSince: number;
+  responsibleNode?: string;
+  responsibleDevice?: string;
+  state: TrackState;
+  escalations: { at: number; from?: string; to?: string; reason: "dead" | "timeout" | "handover"; note?: string }[];
+  engagingAt?: number;
+  neutralised?: { at: number; node: string; device?: string; station?: string; override?: boolean };
+  rejected: { at: number; node: string; device?: string; action: string; reason: string }[];
+  positions: TrackPosition[];
+  lastUpdateAt?: number;
+  lostAt?: number;
+}
+
+/** A track merged across the local nodes: first report, plus how many agree on state + responsible. */
+export interface TrackView extends Track {
+  seenBy: string[];
+  agree: number;
+  consistent: boolean;
+}
+
 export interface MeshState {
   ts: number;
   device: string; // name of the machine this dashboard runs on (DEVICE_NAME)
@@ -170,6 +202,7 @@ export interface MeshState {
   messages: InboxMessage[]; // data-channel messages, most recent last, capped
   geo: GeoTable; // locations of devices and defended assets (see GeoTable)
   lighthouses: LighthouseView[]; // local lighthouses' registries (Lighthouse mode)
+  tracks: TrackView[]; // engagement lifecycle per target, merged across local nodes
 }
 
 export interface LogEvent {

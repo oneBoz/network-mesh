@@ -31,6 +31,8 @@ import { Membership } from "./swim.js";
 import type { MeshMessage, Message, PeerInfo, Rumor, Skills, ThreatEvent, ThreatType } from "./protocol.js";
 import { decode, encode, observed, trimToFit } from "./protocol.js";
 import type { Assignment } from "./skills.js";
+import { applyMessage as applyLifecycle, createEngagement, DEFAULT_ENGAGE_TIMEOUT_MS, DEFAULT_LOST_AFTER_MS, isDetection, LIFECYCLE_KINDS, responsibleNode, serialize as serializeTracks, tick as tickLifecycle } from "./engagement.js";
+import type { EngagementContext } from "./engagement.js";
 import { matchmake, SKILL_TABLE, THREAT_TYPES, toAssignment } from "./skills.js";
 
 // ---------- config ----------
@@ -284,6 +286,19 @@ export interface StoredMessage extends MeshMessage {
 const seenMsgs = new Map<string, number>(); // id → first-seen ts
 const inbox: StoredMessage[] = [];
 
+// ---------- engagement lifecycle (replicated state machine, see engagement.ts) ----------
+const engagement = createEngagement();
+const ENGAGE_TIMEOUT_OVERRIDE = Number(process.env.ENGAGE_TIMEOUT_MS) || undefined;
+function lifecycleCtx(): EngagementContext {
+  return {
+    now: Date.now(),
+    deviceOf: (id) => (id === ID ? DEVICE : membership.allPeers().find((p) => p.id === id)?.device),
+    isAlive: (id) => id === ID || membership.alivePeers().some((p) => p.id === id),
+    engageTimeoutMs: (threat) => ENGAGE_TIMEOUT_OVERRIDE ?? DEFAULT_ENGAGE_TIMEOUT_MS[threat],
+    lostAfterMs: DEFAULT_LOST_AFTER_MS,
+  };
+}
+
 function validMessage(m: unknown): m is MeshMessage {
   const x = m as MeshMessage;
   return !!x && typeof x.id === "string" && !!x.id && typeof x.kind === "string" && !!x.kind
@@ -309,12 +324,22 @@ function ingestMessage(m: unknown, ttl: number, hop?: string): StoredMessage | n
   let stored: StoredMessage | null = null;
   if (mine) {
     stored = { ...m, receivedAt: Date.now(), hop };
-    if (m.kind === "gcs.signal" && typeof m.body.threat === "string" && THREAT_TYPES.includes(m.body.threat as ThreatType)) {
+    if (isDetection(m.kind) && typeof m.body.threat === "string" && THREAT_TYPES.includes(m.body.threat as ThreatType)) {
       stored.assignment = assignLocal({
         threatId: m.id, threat: m.body.threat as ThreatType, at: m.at, origin: m.from.node,
       });
       const a = stored.assignment;
       log(`\x1b[36mSIGNAL ${m.body.threat} from ${m.from.station ?? m.from.node}@${m.from.device ?? "?"} → primary=${a.primary ?? "NONE"} fallbacks=[${a.fallbacks.join(",")}]\x1b[0m`);
+      // The ranked assignment is the chain of responsibility for the lifecycle.
+      const track = applyLifecycle(engagement, m, lifecycleCtx(), a.ranked.map((r) => r.id));
+      if (track) log(`\x1b[36mTRACK ${track.trackId} ${track.state} — responsible ${responsibleNode(track) ?? "NOBODY"}\x1b[0m`);
+    } else if (LIFECYCLE_KINDS.has(m.kind)) {
+      const track = applyLifecycle(engagement, m, lifecycleCtx());
+      if (track && m.kind !== "track.update") {
+        const last = track.rejected.at(-1);
+        const rejectedNow = last && last.node === m.from.node && Date.now() - last.at < 50;
+        log(`\x1b[36mTRACK ${track.trackId} ${m.kind.replace("track.", "")} by ${m.from.station ?? m.from.node}@${m.from.device ?? "?"} → ${rejectedNow ? `REJECTED (${last!.reason})` : `${track.state}, responsible ${responsibleNode(track) ?? "NOBODY"}`}\x1b[0m`);
+      }
     } else {
       log(`\x1b[36mMSG ${m.kind} from ${m.from.station ?? m.from.node}@${m.from.device ?? "?"}${hop ? ` via ${hop}` : ""}\x1b[0m`);
     }
@@ -551,6 +576,11 @@ function protocolTick(): void {
   for (const [id, ts] of seenMsgs) {
     if (ts < msgCutoff) seenMsgs.delete(id);
   }
+  // Engagement lifecycle: escalate on dead/timeout, mark silent tracks lost.
+  for (const t of tickLifecycle(engagement, lifecycleCtx())) {
+    const e = t.escalations.at(-1);
+    log(`\x1b[33mTRACK ${t.trackId} ${t.state === "lost" ? "LOST (updates stopped)" : `escalated (${e?.reason}): ${e?.from ?? "nobody"} → ${e?.to ?? "NOBODY LEFT"}`}\x1b[0m`);
+  }
 
   // Resurrection probe: nobody normally pings the dead, so a false conviction
   // (e.g. both sides of a healed partition convicted each other) can never be
@@ -688,6 +718,12 @@ createServer((req, res) => {
         res.end(JSON.stringify({ error: "invalid JSON body" }));
       }
     });
+  } else if (url === "/tracks") {
+    // Engagement lifecycle as this node computed it (every node should agree).
+    const ctx = lifecycleCtx();
+    res.end(JSON.stringify({ node: ID, device: DEVICE, tracks: serializeTracks(engagement).map((t) => ({
+      ...t, responsibleNode: responsibleNode(t), responsibleDevice: responsibleNode(t) ? ctx.deviceOf(responsibleNode(t)!) : undefined,
+    })) }));
   } else if (url.startsWith("/inbox")) {
     // GET /inbox?after=<receivedAt ms> → messages this node stored after that instant.
     const q = new URL(url, "http://x").searchParams;
@@ -723,7 +759,7 @@ createServer((req, res) => {
     res.end(JSON.stringify({ ok: true, id: ID }));
   } else {
     res.statusCode = 404;
-    res.end(JSON.stringify({ error: "try /members, /resolve/<service>, /engage/<threat>, POST /threat, POST /send, /inbox, /health" }));
+    res.end(JSON.stringify({ error: "try /members, /resolve/<service>, /engage/<threat>, POST /threat, POST /send, /inbox, /tracks, /health" }));
   }
 }).on("error", (err) => {
   log(`http server error: ${err.message}`);

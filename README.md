@@ -102,6 +102,18 @@ stores the result in its inbox. The dashboard merges its local nodes' inboxes
 and shows how many computed the identical answer (`5/5 agree`). No station
 talks to another station; they all just read the mesh.
 
+**Engagement lifecycle.** Every signal is also a *target* with a replicated
+state machine (`backend-network-mesh/src/engagement.ts`, tested in
+`test/engagement.test.ts`): detected → engaging → neutralised, or lost. The
+device that runs the assigned system is *responsible*; only it may press
+**ENGAGE**, **NEUTRALISED** or **hand over** (GCS mode), and every node checks
+that independently — anyone else's attempt is recorded as rejected and shown.
+If the responsible node is convicted dead, or the per-threat engage timeout
+passes (45-60 s), responsibility escalates to the next alive fallback and every
+panel shows the handover. Command mode has an **Engagement timeline** and an
+explicit, logged **override** for neutralising without being responsible.
+Each row shows how many local nodes agree on state and responsible.
+
 Under the hood each node exposes `POST /send {kind, body, to?, station?}` and
 `GET /inbox?after=<ms>`; the control plane wraps them as `POST /api/signal`
 and streams new messages over SSE.

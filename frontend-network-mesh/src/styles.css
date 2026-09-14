@@ -345,3 +345,16 @@ button.toggle.on { color: var(--text); border-color: var(--accent); }
 .lh-card-head { display: flex; gap: 10px; align-items: center; font-size: 13px; }
 .lh-card-head .dot { width: 9px; height: 9px; border-radius: 50%; flex: none; }
 .lh-table td, .lh-table th { padding: 4px 8px; white-space: nowrap; }
+
+/* ---------- engagement lifecycle ---------- */
+.signal-lifecycle { margin-top: 6px; display: flex; gap: 10px; align-items: center; flex-wrap: wrap; border-top: 1px dashed var(--panel-edge); padding-top: 6px; }
+.track-badge-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; font-size: 12.5px; }
+.track-badge { font-size: 10.5px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em; border-radius: 4px; padding: 2px 7px; }
+.tb-detected { color: var(--suspect); background: rgba(245,184,65,.15); }
+.tb-engaging { color: var(--accent); background: rgba(62,155,255,.15); }
+.tb-done { color: var(--alive); background: rgba(45,212,167,.15); }
+.tb-lost { color: var(--muted); background: rgba(125,140,166,.15); }
+.track-controls { display: flex; gap: 6px; align-items: center; margin-left: auto; }
+.track-controls button { padding: 4px 10px; font-size: 12px; }
+button.neutralise { background: rgba(45,212,167,.18); border-color: var(--alive); color: var(--alive); font-weight: 700; }
+button.neutralise:hover { background: var(--alive); color: #06101f; }

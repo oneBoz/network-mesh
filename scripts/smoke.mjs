@@ -78,6 +78,18 @@ if (!merged) fail("signal never showed up in /api/state messages");
 if (!merged.consistent) fail(`nodes disagree on the signal: ${JSON.stringify(merged)}`);
 console.log(`signal received by ${merged.seenBy.length}/${NODES.length} local nodes, all computed the same actions`);
 
+// Engagement lifecycle: the signal is a track; every node must agree on state + responsible.
+let track = null;
+for (let i = 0; i < 10; i++) {
+  const st = await api("/api/state");
+  track = st.tracks.find((t) => t.trackId === sig.id);
+  if (track && track.seenBy.length >= NODES.length) break;
+  await sleep(1_000);
+}
+if (!track) fail("signal did not become a track");
+if (!track.consistent) fail(`nodes disagree on the track lifecycle: ${JSON.stringify(track)}`);
+console.log(`track ${track.state}, responsible ${track.responsibleNode ?? "NOBODY"} on ${track.responsibleDevice ?? "?"} — ${track.agree}/${track.seenBy.length} nodes agree`);
+
 const res = await api("/api/resolve/aegis");
 if (!res.healthy?.length) fail("resolve/aegis returned no healthy instance");
 console.log(`resolve aegis via ${res.via} → ${res.healthy.map((h) => h.id).join(", ")}`);
