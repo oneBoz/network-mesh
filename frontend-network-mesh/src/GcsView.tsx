@@ -7,6 +7,12 @@ import { groupRemotes } from "./remotes";
 import { MapPanel } from "./MapPanel";
 import { TrackBadge, TrackControls, isLiveTrack, trackFor } from "./Engagement";
 
+const SIM_THREATS: { type: ThreatType; label: string; eta: number }[] = [
+  { type: "missile", label: "🚀 missile", eta: 45_000 },
+  { type: "swarm", label: "🐝 swarm", eta: 120_000 },
+  { type: "aircraft", label: "✈️ aircraft", eta: 90_000 },
+];
+
 const STATION_KEY = "mesh-gcs-station";
 const THREATS: { type: ThreatType; icon: string; hint: string }[] = [
   { type: "missile", icon: "🚀", hint: "ballistic / cruise" },
@@ -38,6 +44,18 @@ export function GcsView({
   const [note, setNote] = useState("");
   const [busy, setBusy] = useState<ThreatType | null>(null);
   const [lastSent, setLastSent] = useState<string | null>(null); // message id
+  // Scenario launcher (simulated incoming target): pick threat, target and ETA, then click the map for the origin.
+  const [simThreat, setSimThreat] = useState<ThreatType>("missile");
+  const [simTarget, setSimTarget] = useState("");
+  const [simEta, setSimEta] = useState(45_000);
+  const [picking, setPicking] = useState(false);
+  const targets = Object.entries(state.geo.entries).filter(([id]) => id !== state.device);
+  const launch = async (origin: { lat: number; lng: number }) => {
+    setPicking(false);
+    try {
+      await api.startSim({ threat: simThreat, origin, target: simTarget, etaMs: simEta, station: stationName });
+    } catch (e) { onError((e as Error).message); }
+  };
   const [myIds, setMyIds] = useState<Set<string>>(() => new Set());
 
   const defaultStation = state.device ? `GCS-${state.device}` : "GCS";
@@ -49,7 +67,7 @@ export function GcsView({
   const liveNodes = state.procs.filter((p) => p.kind === "node" && p.running);
   const aliveRemotes = state.remotes.filter((r) => r.status === "alive");
   const remoteDevices = groupRemotes(state.remotes);
-  const signals = state.messages.filter((m) => m.kind === "gcs.signal");
+  const signals = state.messages.filter((m) => m.kind === "gcs.signal" || m.kind === "track.detected");
   const myLive = state.tracks.filter((t) => isLiveTrack(t) && t.responsibleDevice === state.device);
   const latest: InboxMessage | undefined = signals.at(-1);
   const highlighted = activeThreat && latest && activeThreat.threatId === latest.id ? latest : latest;
@@ -123,6 +141,44 @@ export function GcsView({
           )}
         </div>
 
+        <div className="panel">
+          <h2>Launch a simulated incoming target <span className="muted" style={{ fontWeight: 400, textTransform: "none", letterSpacing: 0 }}>· streams its trajectory to every device at 1 Hz</span></h2>
+          <div className="row" style={{ gap: 8 }}>
+            <select value={simThreat} onChange={(e) => { const t = e.target.value as ThreatType; setSimThreat(t); setSimEta(SIM_THREATS.find((x) => x.type === t)?.eta ?? 90_000); }}>
+              {SIM_THREATS.map((t) => <option key={t.type} value={t.type}>{t.label}</option>)}
+            </select>
+            <span className="muted">→</span>
+            <select value={simTarget} onChange={(e) => setSimTarget(e.target.value)}>
+              <option value="">target…</option>
+              {targets.map(([id, e]) => <option key={id} value={id}>{e.kind === "asset" ? "◆ " : "● "}{e.label ?? id}</option>)}
+            </select>
+            <span className="muted">impact in</span>
+            <select value={simEta} onChange={(e) => setSimEta(Number(e.target.value))}>
+              {[30_000, 45_000, 90_000, 180_000, 300_000].map((ms) => <option key={ms} value={ms}>{ms / 1000}s</option>)}
+            </select>
+            <button className={picking ? "primary" : undefined} disabled={!simTarget || state.sims.length >= 3 || !liveNodes.length}
+              onClick={() => setPicking((p) => !p)}>
+              {picking ? "click the map for the origin… (cancel)" : "▶ pick origin on map"}
+            </button>
+          </div>
+          {!targets.length && <div className="muted" style={{ fontSize: 12, marginTop: 6 }}>No targets on the map yet — place devices or defended assets in Command mode.</div>}
+          {state.sims.length > 0 && (
+            <div className="proc-list" style={{ marginTop: 8 }}>
+              {state.sims.map((s) => {
+                const t = trackFor(state, s.trackId);
+                return (
+                  <div className="proc" key={s.trackId}>
+                    <span className="dot" style={{ background: "var(--suspect)" }} />
+                    <span className="name">{s.threat}</span>
+                    <span className="meta">→ {state.geo.entries[s.target]?.label ?? s.target} · seq {s.seq} · {t ? `${t.state}, responsible ${t.responsibleDevice ?? "nobody"}` : "launching…"}</span>
+                    <button className="danger" onClick={() => api.cancelSim(s.trackId).catch((e: Error) => onError(e.message))}>cancel</button>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+
         {highlighted && highlighted.assignment && (
           <div className="panel gcs-engage">
             <h2>Latest engagement</h2>
@@ -175,7 +231,7 @@ export function GcsView({
       </div>
 
       <div className="gcs-col">
-        <MapPanel state={state} editable={false} height={280} />
+        <MapPanel state={state} editable={false} height={340} pickOrigin={picking} onPickOrigin={launch} />
         <div className="panel gcs-feed">
           <h2>Signals on the mesh — all stations, all devices <span className="remote-tag">live</span></h2>
           {signals.length ? (

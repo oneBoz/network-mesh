@@ -1,4 +1,4 @@
-import type { GeoEntry, GeoTable, InboxMessage, LogEvent, MeshState, ThreatAssignmentEvent, ThreatType } from "./types";
+import type { GeoEntry, GeoTable, InboxMessage, LogEvent, MeshState, SimTrackInfo, ThreatAssignmentEvent, ThreatType } from "./types";
 
 async function post(path: string, body?: unknown): Promise<unknown> {
   const r = await fetch(path, {
@@ -40,6 +40,13 @@ export const api = {
     const data = (await r.json().catch(() => ({}))) as GeoTable & { error?: string };
     if (!r.ok) throw new Error(data.error ?? `${r.status} ${r.statusText}`);
     return data;
+  },
+  /** Launch / cancel a simulated incoming target driven by this device's control plane. */
+  startSim: (spec: { threat: ThreatType; origin: { lat: number; lng: number }; target: string; etaMs: number; station?: string; note?: string }) =>
+    post("/api/sim/tracks", spec) as Promise<SimTrackInfo>,
+  cancelSim: async (trackId: string): Promise<void> => {
+    const r = await fetch(`/api/sim/tracks/${encodeURIComponent(trackId)}`, { method: "DELETE" });
+    if (!r.ok) { const d = (await r.json().catch(() => ({}))) as { error?: string }; throw new Error(d.error ?? `${r.status}`); }
   },
   /** Engagement lifecycle action on a track. Only the responsible device is accepted
    *  by the mesh (override = Command); the reducer on every node decides. */

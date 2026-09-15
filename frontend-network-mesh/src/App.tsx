@@ -39,7 +39,7 @@ function initialMode(): Mode {
 /** A GCS signal carries the same ranked answer a threat injection does — reuse
  *  the topology's engagement highlight for it. */
 export function signalToThreat(m: InboxMessage): ThreatAssignmentEvent | null {
-  if (m.kind !== "gcs.signal" || !m.assignment) return null;
+  if ((m.kind !== "gcs.signal" && m.kind !== "track.detected") || !m.assignment) return null;
   return {
     threatId: m.id,
     threat: m.body.threat as ThreatType,
@@ -54,7 +54,7 @@ export function signalToThreat(m: InboxMessage): ThreatAssignmentEvent | null {
 const EMPTY: MeshState = {
   ts: 0, device: "", procs: [], views: [], threats: [], remotes: [], extraLighthouses: [], messages: [],
   geo: { version: 0, updatedBy: "", updatedAt: 0, entries: {} },
-  lighthouses: [], tracks: [],
+  lighthouses: [], tracks: [], sims: [],
 };
 
 export function App() {
@@ -95,7 +95,7 @@ export function App() {
         const t = signalToThreat(m);
         if (t) highlight(t);
         // A neutralised (or lost) target stops glowing on the topology.
-        if ((m.kind === "track.neutralised" || m.kind === "track.lost") && typeof m.body.trackId === "string") {
+        if ((m.kind === "track.neutralised" || m.kind === "track.lost" || m.kind === "track.impact") && typeof m.body.trackId === "string") {
           const id = m.body.trackId;
           setActiveThreat((cur) => (cur && cur.threatId === id ? null : cur));
         }

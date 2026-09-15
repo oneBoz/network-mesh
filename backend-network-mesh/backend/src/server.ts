@@ -27,6 +27,9 @@
  *   POST   /api/tracks/<id>/<action>   action ∈ neutralise | handover | engaging, body {station?, note?, override?}
  *                                      → lifecycle message from this device; only the
  *                                      responsible device is accepted (override = Command)
+ *   POST   /api/sim/tracks             {threat, origin:{lat,lng}, target:<geo id>, etaMs?, station?, note?}
+ *                                      → launch a simulated incoming target (≤3 live per device)
+ *   DELETE /api/sim/tracks/<id>        cancel it (sends track.lost)
  *   POST   /api/signal                 {threat, station?, note?, via?} → a GCS signal:
  *                                      sent as a data-channel message through one
  *                                      node, flooded to every device on the mesh;
@@ -47,6 +50,7 @@ import { readFile, stat } from "node:fs/promises";
 import { extname, join, normalize } from "node:path";
 import { ADVERTISE, DEVICE, DEVICE_SLUG, ProcManager, ROOT } from "./procman.js";
 import { GeoStore } from "./geo.js";
+import { Simulator } from "./simulator.js";
 import type { InboxMessage, LighthouseView, LogEvent, MeshState, NodeStatus, NodeView, ProcSpec, ProcState, RemoteMember, ThreatAssignmentEvent, ThreatType, Track, TrackView } from "./types.js";
 
 const portFlag = process.argv.indexOf("--port");
@@ -98,21 +102,25 @@ const GEO_REBROADCAST_MS = 60_000;
 const GEO_REQUEST_MS = 15_000;
 let lastGeoRequest = 0;
 
-/** Send a data-channel message through any live local node (fire and forget). */
-async function sendViaLocalNode(kind: string, body: Record<string, unknown>): Promise<boolean> {
+/** Send a data-channel message through any live local node; returns the stored message (with its id) or null. */
+async function sendMessage(kind: string, body: Record<string, unknown>, station?: string): Promise<{ id?: string } | null> {
   const nodes = procman.list().filter((p) => p.kind === "node" && p.running && p.httpPort);
   const target = nodes[Math.floor(Math.random() * nodes.length)];
-  if (!target) return false;
+  if (!target) return null;
   try {
     const r = await fetch(`http://127.0.0.1:${target.httpPort}/send`, {
       method: "POST", headers: { "content-type": "application/json" },
-      body: JSON.stringify({ kind, body }), signal: AbortSignal.timeout(1_000),
+      body: JSON.stringify({ kind, body, station }), signal: AbortSignal.timeout(1_000),
     });
-    return r.ok;
+    return r.ok ? ((await r.json()) as { id?: string }) : null;
   } catch {
-    return false;
+    return null;
   }
 }
+const sendViaLocalNode = async (kind: string, body: Record<string, unknown>): Promise<boolean> => !!(await sendMessage(kind, body));
+
+// ---------- simulated targets ----------
+const sim = new Simulator(sendMessage, () => lastState.tracks, (line) => broadcast("log", { source: "backend", line, ts: Date.now() } satisfies LogEvent));
 
 function broadcastGeo(): void {
   const t = geo.get();
@@ -197,7 +205,7 @@ async function pollInbox(node: string, httpPort: number): Promise<void> {
 
 let lastState: MeshState = {
   ts: Date.now(), device: DEVICE, procs: [], views: [], threats: recentThreats,
-  remotes: [], extraLighthouses: procman.extraLighthouses(), messages, geo: geo.get(), lighthouses: [], tracks: [],
+  remotes: [], extraLighthouses: procman.extraLighthouses(), messages, geo: geo.get(), lighthouses: [], tracks: [], sims: [],
 };
 
 const RANK: Record<NodeStatus, number> = { alive: 0, suspect: 1, dead: 2 };
@@ -276,7 +284,7 @@ async function poll(): Promise<void> {
   lastState = {
     ts: Date.now(), device: DEVICE, procs, views, threats: recentThreats,
     remotes: deriveRemotes(procs, views), extraLighthouses: procman.extraLighthouses(), messages, geo: geo.get(),
-    lighthouses, tracks,
+    lighthouses, tracks, sims: sim.list(),
   };
   broadcast("state", lastState);
 }
@@ -558,6 +566,34 @@ const server = createServer(async (req, res) => {
       broadcastGeo();
       broadcast("log", { source: "backend", line: `placed ${entry.kind} ${entry.label ?? id} at ${entry.lat.toFixed(4)}, ${entry.lng.toFixed(4)} (table v${geo.get().version})`, ts: Date.now() } satisfies LogEvent);
       return json(res, 200, geo.get());
+    }
+
+    // Simulated incoming targets (GCS scenario launcher).
+    if (path === "/api/sim/tracks" && method === "POST") {
+      const body = await readJson(req);
+      const threat = body.threat as ThreatType;
+      const origin = body.origin as { lat?: number; lng?: number } | undefined;
+      const targetId = typeof body.target === "string" ? body.target : "";
+      const targetEntry = geo.get().entries[targetId];
+      if (!["missile", "swarm", "aircraft"].includes(threat)) return json(res, 400, { error: "threat must be missile, swarm or aircraft (EMP is an area event)" });
+      if (!origin || typeof origin.lat !== "number" || typeof origin.lng !== "number") return json(res, 400, { error: "origin {lat, lng} required — click the map" });
+      if (!targetEntry) return json(res, 400, { error: `target "${targetId}" is not on the map — place it first` });
+      const etaMs = Number(body.etaMs) > 0 ? Number(body.etaMs) : 90_000;
+      try {
+        const info = await sim.start({
+          threat, origin: { lat: origin.lat, lng: origin.lng }, target: { id: targetId, lat: targetEntry.lat, lng: targetEntry.lng },
+          etaMs, station: typeof body.station === "string" && body.station.trim() ? body.station.trim() : undefined,
+          note: typeof body.note === "string" && body.note.trim() ? body.note.trim() : undefined,
+        });
+        return json(res, 201, info);
+      } catch (err) {
+        return json(res, 409, { error: (err as Error).message });
+      }
+    }
+    const simMatch = path.match(/^\/api\/sim\/tracks\/([^/]+)$/);
+    if (simMatch && method === "DELETE") {
+      const ok = await sim.cancel(decodeURIComponent(simMatch[1]));
+      return json(res, ok ? 200 : 404, ok ? { ok: true } : { error: "no such simulated track on this device" });
     }
 
     // Engagement lifecycle actions: sent as data-channel messages from a local

@@ -114,6 +114,17 @@ panel shows the handover. Command mode has an **Engagement timeline** and an
 explicit, logged **override** for neutralising without being responsible.
 Each row shows how many local nodes agree on state and responsible.
 
+**Trajectories.** GCS mode can launch a *simulated incoming target*: pick
+missile, swarm or aircraft, a target from the map (a device or defended asset),
+a time to impact, then click the map for the launch origin. This device's
+control plane drives the track and streams `track.update` at 1 Hz to the whole
+mesh; every map shows the trajectory (colour by threat, heading arrow, ETA,
+dashed line to the target, responsible device), smoothed between updates.
+If the responsible GCS neutralises it the stream stops and the head turns into
+✔; if it reaches the target while still live it becomes ✖ **IMPACT** — the
+defence leaked. At most three simulated tracks per device; **cancel** sends
+`track.lost`. EMP has no trajectory and stays a point signal.
+
 Under the hood each node exposes `POST /send {kind, body, to?, station?}` and
 `GET /inbox?after=<ms>`; the control plane wraps them as `POST /api/signal`
 and streams new messages over SSE.

@@ -238,6 +238,19 @@ stream + map → offline fallback and scenarios.
   (5/5 agree both sides), killing the responsible node escalated to the Mac
   in ~10 s, handover moved responsibility across devices.
 
+### 2026-09-15 — G2 built: simulated tracks + trajectories
+
+- `backend/src/simulator.ts`: server-side scenario driver (≤3 live per device,
+  1 Hz `track.update`, per-threat lateral pattern, stops when the mesh says the
+  track is no longer live, `track.impact` on arrival, `track.lost` on cancel).
+  `POST /api/sim/tracks`, `DELETE /api/sim/tracks/<id>`, `MeshState.sims`.
+- Reducer: `impact` terminal state (origin-only), `target` field, terminal
+  states refuse further actions (11 tests).
+- Map: trajectory layer (polyline, pulsing heading glyph, label with state/ETA/
+  target/responsible, dashed line to target, ✔/✖ heads, CSS-transitioned
+  motion), origin picking mode. GCS: scenario launcher + running sims list
+  with cancel. Impact in badges and timeline; topology ring cleared on impact.
+
 ## Verifying a build (checklist)
 
 ```sh

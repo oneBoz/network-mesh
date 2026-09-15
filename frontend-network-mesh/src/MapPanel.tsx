@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import L from "leaflet";
 import "leaflet/dist/leaflet.css";
-import type { GeoEntry, MeshState, NodeStatus } from "./types";
+import type { GeoEntry, MeshState, NodeStatus, TrackView } from "./types";
 import { groupRemotes } from "./remotes";
 import { api } from "./api";
 
@@ -12,6 +12,9 @@ const ATTRIB = '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStr
 const STATUS_COLOR: Record<NodeStatus | "unknown" | "asset", string> = {
   alive: "#2dd4a7", suspect: "#f5b841", dead: "#e5484d", unknown: "#3a4a68", asset: "#8b7cf6",
 };
+const THREAT_COLOR: Record<string, string> = { missile: "#ff6b6b", swarm: "#f5b841", aircraft: "#5eead4", emp: "#c4b5fd" };
+const THREAT_GLYPH: Record<string, string> = { missile: "▲", swarm: "✱", aircraft: "✈", emp: "⚡" };
+const RECENT_MS = 90_000; // finished tracks stay on the map this long
 
 interface Placeable {
   id: string;
@@ -59,12 +62,17 @@ function icon(p: Placeable, selected: boolean): L.DivIcon {
  * marker to move it; × removes an asset. Every edit goes to PUT /api/geo/<id>,
  * which persists it and broadcasts the table to the whole mesh.
  */
-export function MapPanel({ state, editable, height = 340, onError }: {
+export function MapPanel({ state, editable, height = 340, onError, pickOrigin, onPickOrigin }: {
   state: MeshState; editable: boolean; height?: number; onError?: (m: string) => void;
+  /** When set, the next map click is reported here (GCS scenario launcher) instead of placing. */
+  pickOrigin?: boolean; onPickOrigin?: (p: { lat: number; lng: number }) => void;
 }) {
   const el = useRef<HTMLDivElement>(null);
   const map = useRef<L.Map | null>(null);
   const layer = useRef<L.LayerGroup | null>(null);
+  const trackLayer = useRef<L.LayerGroup | null>(null);
+  const pickRef = useRef<{ on: boolean; cb?: (p: { lat: number; lng: number }) => void }>({ on: false });
+  pickRef.current = { on: !!pickOrigin, cb: onPickOrigin };
   const [selected, setSelected] = useState<string | null>(null);
   const [newAsset, setNewAsset] = useState("");
   const [offline, setOffline] = useState(false);
@@ -80,7 +88,9 @@ export function MapPanel({ state, editable, height = 340, onError }: {
     tiles.on("tileload", () => setOffline(false));
     tiles.addTo(m);
     layer.current = L.layerGroup().addTo(m);
+    trackLayer.current = L.layerGroup().addTo(m);
     m.on("click", (e: L.LeafletMouseEvent) => {
+      if (pickRef.current.on) { pickRef.current.cb?.({ lat: e.latlng.lat, lng: e.latlng.lng }); return; }
       const sel = selectedRef.current;
       if (!sel) return;
       api.placeGeo(sel.id, { kind: sel.kind, lat: e.latlng.lat, lng: e.latlng.lng, label: sel.label })
@@ -113,6 +123,54 @@ export function MapPanel({ state, editable, height = 340, onError }: {
     }
   }, [state.geo.version, state.remotes, state.procs, selected, editable]);
 
+  // Trajectories: polyline + heading arrow at the head, label with state and ETA,
+  // dashed line to the target, ✖ at impact. Marker moves are CSS-transitioned
+  // (see styles) so 1 Hz updates look continuous.
+  useEffect(() => {
+    const g = trackLayer.current;
+    if (!g) return;
+    g.clearLayers();
+    const now = Date.now();
+    for (const t of state.tracks) {
+      if (!t.positions.length) continue;
+      const finishedAt = t.neutralised?.at ?? t.lostAt ?? t.impactAt;
+      if (finishedAt && now - finishedAt > RECENT_MS) continue;
+      const live = t.state === "detected" || t.state === "engaging";
+      const color = THREAT_COLOR[t.threat] ?? "#fff";
+      const pts = t.positions.map((p) => [p.lat, p.lng] as L.LatLngTuple);
+      const head = t.positions[t.positions.length - 1];
+      L.polyline(pts, { color, weight: live ? 2.5 : 1.5, opacity: live ? 0.9 : 0.4, dashArray: live ? undefined : "4 6" }).addTo(g);
+      const target = t.target ? state.geo.entries[t.target] : undefined;
+      if (target && live) L.polyline([[head.lat, head.lng], [target.lat, target.lng]], { color, weight: 1, opacity: 0.35, dashArray: "2 8" }).addTo(g);
+      const eta = head.eta !== undefined && live ? ` · ETA ${Math.max(0, Math.round(head.eta / 1000))}s` : "";
+      const stateTxt = t.state === "neutralised" ? "✔ NEUTRALISED" : t.state === "impact" ? "✖ IMPACT" : t.state === "lost" ? "lost" : t.state === "engaging" ? "engaging" : "inbound";
+      const rot = head.heading ?? 0;
+      const html = t.state === "impact"
+        ? `<div class="track-head impact" style="--c:${color}">✖</div>`
+        : t.state === "neutralised"
+          ? `<div class="track-head done" style="--c:${color}">✔</div>`
+          : `<div class="track-head${live ? " live" : ""}" style="--c:${color};transform:rotate(${rot}deg)">${THREAT_GLYPH[t.threat] ?? "●"}</div>`;
+      const mk = L.marker([head.lat, head.lng], {
+        icon: L.divIcon({ className: "track-icon", html: `${html}<div class="track-label" style="--c:${color}">${t.threat.toUpperCase()} ${stateTxt}${eta}<br><span>→ ${t.target ? (state.geo.entries[t.target]?.label ?? t.target) : "?"} · ${t.responsibleDevice ?? "nobody"}</span></div>`, iconSize: [24, 24], iconAnchor: [12, 12] }),
+        interactive: true, zIndexOffset: 500,
+      });
+      mk.bindTooltip(`<b>${t.threat}</b> ${t.trackId}<br>from ${t.origin.station ?? t.origin.node}@${t.origin.device ?? "?"}<br>state: ${t.state}<br>responsible: ${t.responsibleDevice ?? "nobody"} (${t.responsibleNode ?? "-"})<br>${t.positions.length} positions${head.speed ? `, ${Math.round(head.speed * 3.6)} km/h` : ""}`, { direction: "top", offset: [0, -12] });
+      mk.addTo(g);
+      if (pts.length > 1) L.circleMarker(pts[0], { radius: 3, color, fillColor: color, fillOpacity: 0.8, weight: 1 }).addTo(g); // origin dot
+    }
+  }, [state.tracks, state.geo.version]);
+
+  const fitAll = () => {
+    const m = map.current;
+    if (!m) return;
+    const pts: L.LatLngTuple[] = [];
+    for (const e of Object.values(state.geo.entries)) pts.push([e.lat, e.lng]);
+    for (const t of state.tracks) for (const p of t.positions) pts.push([p.lat, p.lng]);
+    if (pts.length >= 2) m.fitBounds(L.latLngBounds(pts).pad(0.15), { animate: true });
+    else if (pts.length === 1) m.setView(pts[0], 12);
+    else m.setView(SINGAPORE, 11);
+  };
+
   const pick = (id: string, kind: GeoEntry["kind"], label?: string) => {
     if (!editable) return;
     if (selected === id) { setSelected(null); selectedRef.current = null; return; }
@@ -139,9 +197,11 @@ export function MapPanel({ state, editable, height = 340, onError }: {
           </span>
         )}
         {offline && <span className="remote-tag" style={{ marginLeft: 8, color: "var(--suspect)", background: "rgba(245,184,65,.15)" }}>tiles offline</span>}
+        {pickOrigin && <span className="remote-tag" style={{ marginLeft: 8, color: "var(--suspect)", background: "rgba(245,184,65,.15)" }}>click the map: launch origin</span>}
+        <button className="map-fit" title="fit the map to every device, asset and trajectory" onClick={fitAll}>⤢ fit</button>
       </h2>
       <div className="map-row">
-        <div ref={el} className="map" style={{ height }} />
+        <div ref={el} className={`map${pickOrigin ? " picking" : ""}`} style={{ height }} />
         {editable && (
           <div className="map-side">
             <div className="muted" style={{ fontSize: 11, marginBottom: 6 }}>

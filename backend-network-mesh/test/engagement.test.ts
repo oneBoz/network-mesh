@@ -150,3 +150,17 @@ test("determinism: two nodes replaying the same log with the same membership rea
   assert.equal(a, b);
   assert.match(a, /"s":"neutralised"/);
 });
+
+test("impact is terminal, only the origin may report it, and it records the final position", () => {
+  const st = createEngagement();
+  applyMessage(st, msg("track.detected", GCS_MAC, { threat: "missile", target: "asset-changi", pos: { lat: 1.2, lng: 103.8 } }, 1000, "t1"), ctx(1000), CHAIN);
+  assert.equal(st.tracks.get("t1")!.target, "asset-changi");
+  applyMessage(st, msg("track.impact", GCS_VM, { trackId: "t1", lat: 1.35, lng: 103.99 }, 5000), ctx(5000));
+  assert.equal(st.tracks.get("t1")!.state, "detected", "vm is not the origin");
+  applyMessage(st, msg("track.impact", GCS_MAC, { trackId: "t1", lat: 1.35, lng: 103.99 }, 6000), ctx(6000));
+  const t = st.tracks.get("t1")!;
+  assert.equal(t.state, "impact");
+  assert.equal(t.positions.at(-1)!.lat, 1.35);
+  applyMessage(st, msg("track.neutralised", GCS_VM, { trackId: "t1" }, 7000), ctx(7000));
+  assert.equal(t.state, "impact", "too late");
+});

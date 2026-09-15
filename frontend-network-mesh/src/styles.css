@@ -358,3 +358,22 @@ button.toggle.on { color: var(--text); border-color: var(--accent); }
 .track-controls button { padding: 4px 10px; font-size: 12px; }
 button.neutralise { background: rgba(45,212,167,.18); border-color: var(--alive); color: var(--alive); font-weight: 700; }
 button.neutralise:hover { background: var(--alive); color: #06101f; }
+
+/* ---------- trajectories ---------- */
+.leaflet-marker-icon.track-icon { transition: transform 1s linear; } /* 1 Hz updates look continuous */
+.map.picking .leaflet-container { cursor: crosshair; }
+.track-head {
+  width: 24px; height: 24px; display: flex; align-items: center; justify-content: center; border-radius: 50%;
+  color: var(--c); font-size: 15px; font-weight: 700; background: rgba(11,18,32,.75); border: 2px solid var(--c);
+  text-shadow: 0 0 6px var(--c);
+}
+.track-head.live { animation: track-pulse 1.2s ease-in-out infinite; }
+.track-head.impact { border-color: var(--dead); color: var(--dead); background: rgba(229,72,77,.35); font-size: 17px; }
+.track-head.done { border-color: var(--alive); color: var(--alive); background: rgba(45,212,167,.25); }
+@keyframes track-pulse { 0%,100% { box-shadow: 0 0 0 0 var(--c); } 50% { box-shadow: 0 0 0 7px rgba(0,0,0,0); } }
+.track-label { position: absolute; top: 26px; left: 50%; transform: translateX(-50%); white-space: nowrap; font-size: 10.5px; font-weight: 700; color: var(--c); text-shadow: 0 0 4px #000, 0 0 4px #000; text-align: center; line-height: 1.25; }
+.track-label span { font-weight: 400; color: var(--text); }
+.tb-impact { color: var(--dead); background: rgba(229,72,77,.18); }
+
+.map-fit { margin-left: auto; padding: 2px 8px; font-size: 11px; text-transform: none; letter-spacing: 0; }
+.map-panel h2 { display: flex; align-items: center; }

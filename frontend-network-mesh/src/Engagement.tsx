@@ -9,12 +9,12 @@ export const isLiveTrack = (t: TrackView) => t.state === "detected" || t.state =
 
 /** One-word state with colour, plus who is responsible now. */
 export function TrackBadge({ t, state }: { t: TrackView; state: MeshState }) {
-  const cls = t.state === "neutralised" ? "tb-done" : t.state === "lost" ? "tb-lost" : t.state === "engaging" ? "tb-engaging" : "tb-detected";
+  const cls = t.state === "neutralised" ? "tb-done" : t.state === "lost" ? "tb-lost" : t.state === "impact" ? "tb-impact" : t.state === "engaging" ? "tb-engaging" : "tb-detected";
   const mine = !!t.responsibleDevice && t.responsibleDevice === state.device;
   return (
     <span className="track-badge-row">
       <span className={`track-badge ${cls}`}>
-        {t.state === "neutralised" ? "✔ neutralised" : t.state === "lost" ? "lost" : t.state === "engaging" ? "engaging" : "awaiting engagement"}
+        {t.state === "neutralised" ? "✔ neutralised" : t.state === "lost" ? "lost" : t.state === "impact" ? "✖ IMPACT — leaked" : t.state === "engaging" ? "engaging" : "awaiting engagement"}
       </span>
       {isLiveTrack(t) && (
         t.responsibleNode
@@ -82,6 +82,7 @@ export function TimelinePanel({ state }: { state: MeshState }) {
     if (t.engagingAt) events.push({ at: t.engagingAt, text: `${t.threat.toUpperCase()} engaging — ${t.responsibleDevice ?? t.responsibleNode ?? "?"} acknowledged` });
     if (t.neutralised) events.push({ at: t.neutralised.at, text: `${t.threat.toUpperCase()} NEUTRALISED by ${t.neutralised.station ?? t.neutralised.device ?? t.neutralised.node}${t.neutralised.override ? " (Command override)" : ""}`, cls: "log-good" });
     if (t.lostAt) events.push({ at: t.lostAt, text: `${t.threat.toUpperCase()} lost — updates stopped`, cls: "log-warn" });
+    if (t.impactAt) events.push({ at: t.impactAt, text: `${t.threat.toUpperCase()} IMPACT on ${t.target ?? "target"} — the defence leaked`, cls: "log-bad" });
   }
   events.sort((a, b) => b.at - a.at);
   const live = state.tracks.filter(isLiveTrack).length;

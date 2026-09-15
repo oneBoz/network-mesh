@@ -418,7 +418,7 @@ and the handover message from the GCS resolves it explicitly.
 | Phase | Scope | Estimate |
 |---|---|---|
 | G1 ✅ 2026-09-14 | Location table, persistence volume, broadcast + request, map component with tiles and device markers, place mode | 1.5 days |
-| G2 | Track simulator, `track.*` messages, coalescing, snapshots, trajectory rendering on Command and GCS | 2 days |
+| G2 ✅ 2026-09-15 | Track simulator, `track.*` messages, coalescing, trajectory rendering on Command and GCS (snapshots deferred: the reducer replays out-of-order and positions accumulate, so late joiners converge without them) | 2 days |
 | G3 ✅ 2026-09-15 | Lifecycle reducer (shared TypeScript module used by node and control plane), escalation rules, authorised neutralise, timeline, agreement counter | 1.5 days |
 | G4 | Offline basemap fallback, scripted scenarios, `node:test` suite for the reducer (same message log ⇒ same states on every node), docs, judge demo script | 1 day |
 

@@ -82,6 +82,9 @@ http://127.0.0.1:7070 — by default from a sibling checkout at
     GET    /api/geo                    location table (devices + defended assets)
     PUT    /api/geo/<id>               {kind, lat, lng, label?} → place or move; persisted, broadcast
     DELETE /api/geo/<id>               remove; broadcast
+    POST   /api/sim/tracks             {threat, origin:{lat,lng}, target:<geo id>, etaMs?, station?, note?}
+                                       → launch a simulated incoming target driven by this control plane
+    DELETE /api/sim/tracks/<id>        cancel it (sends track.lost)
     POST   /api/tracks/<id>/<action>   neutralise | handover | engaging, body {station?, note?, override?}
                                        → lifecycle message from this device (see engagement.ts)
     POST   /api/signal                 {threat, station?, note?, via?} → GCS signal:
@@ -188,6 +191,8 @@ messages addressed to it (or broadcast) in a bounded inbox.
 The ingesting node's ranked assignment is the chain of responsibility; the
 device running the responsible node is the only one whose lifecycle messages
 are accepted (`override: true` is Command's logged escape hatch). Escalation
+`track.impact` (only from the track's origin device) marks a live track as
+having reached its target — terminal, like neutralised and lost. Escalation
 down the chain happens when the responsible node is dead (membership), the
 engage timeout passes (45 s missile, 60 s swarm/aircraft, 30 s emp;
 `ENGAGE_TIMEOUT_MS` overrides), or the responsible GCS hands over. Messages

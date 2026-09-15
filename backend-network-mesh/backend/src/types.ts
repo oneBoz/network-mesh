@@ -158,7 +158,7 @@ export interface GeoTable {
 
 
 /** Engagement lifecycle of one target, as computed by a node (see src/engagement.ts). */
-export type TrackState = "detected" | "engaging" | "neutralised" | "lost";
+export type TrackState = "detected" | "engaging" | "neutralised" | "lost" | "impact";
 export interface TrackPosition { seq: number; t: number; lat: number; lng: number; alt?: number; heading?: number; speed?: number; eta?: number }
 export interface Track {
   trackId: string;
@@ -166,6 +166,7 @@ export interface Track {
   detectedAt: number;
   origin: { node: string; device?: string; station?: string };
   note?: string;
+  target?: string; // location-table id the threat heads for
   chain: string[]; // ranked node ids, primary first
   responsibleIndex: number;
   responsibleSince: number;
@@ -179,6 +180,17 @@ export interface Track {
   positions: TrackPosition[];
   lastUpdateAt?: number;
   lostAt?: number;
+  impactAt?: number;
+}
+
+/** A simulated track this control plane is driving (GCS scenario). */
+export interface SimTrackInfo {
+  trackId: string;
+  threat: ThreatType;
+  target: string;
+  etaMs: number; // planned time from launch to impact
+  startedAt: number;
+  seq: number;
 }
 
 /** A track merged across the local nodes: first report, plus how many agree on state + responsible. */
@@ -200,6 +212,7 @@ export interface MeshState {
   geo: GeoTable; // locations of devices and defended assets (see GeoTable)
   lighthouses: LighthouseView[]; // local lighthouses' registries (Lighthouse mode)
   tracks: TrackView[]; // engagement lifecycle per target, merged across local nodes
+  sims: SimTrackInfo[]; // simulated tracks this device is currently driving
 }
 
 export interface LogEvent {

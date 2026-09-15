@@ -22,7 +22,7 @@ export function SignalRow({ m, state, mine, station, command, onError }: {
     <div className={`signal-row${mine ? " mine" : ""}`}>
       <div className="signal-head">
         <span className="signal-time">{fmtTime(m.at)}</span>
-        <span className="threat-tag">{String(m.body.threat)}</span>
+        <span className="threat-tag">{String(m.body.threat)}{m.kind === "track.detected" ? " · track" : ""}</span>
         <span className="signal-from">
           {m.from.station ?? m.from.node}
           {m.from.device && <span className="signal-device"> @ {m.from.device}{host ? ` (${host})` : ""}</span>}
@@ -69,7 +69,7 @@ export function SignalRow({ m, state, mine, station, command, onError }: {
 
 /** Command-mode feed: every GCS signal on the mesh, from any device, newest first. */
 export function SignalsPanel({ state, onError }: { state: MeshState; onError?: (m: string) => void }) {
-  const signals = state.messages.filter((m) => m.kind === "gcs.signal").slice(-MAX_ROWS).reverse();
+  const signals = state.messages.filter((m) => m.kind === "gcs.signal" || m.kind === "track.detected").slice(-MAX_ROWS).reverse();
   return (
     <div className="panel">
       <h2>GCS signals — actions taken <span className="remote-tag">live</span></h2>

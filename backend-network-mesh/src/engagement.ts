@@ -13,7 +13,8 @@
  *      │  └──────────┘ (escalated: responsibility moves down the fallback chain
  *      │                when the responsible node dies, the engage timeout
  *      │                passes, or its GCS hands over)
- *      └──► lost (track updates stopped)
+ *      ├──► lost (track updates stopped)
+ *      └──► impact (the target reached what it was aimed at — the defence leaked)
  *
  * Detection = `gcs.signal` or `track.detected` (same semantics: the ingesting
  * node's matchmaking assignment is the chain of responsibility, primary first).
@@ -23,7 +24,7 @@
  */
 import type { MeshMessage, ThreatType } from "./protocol.js";
 
-export type TrackState = "detected" | "engaging" | "neutralised" | "lost";
+export type TrackState = "detected" | "engaging" | "neutralised" | "lost" | "impact";
 export type EscalationReason = "dead" | "timeout" | "handover";
 
 export interface TrackPosition {
@@ -45,6 +46,7 @@ export interface Track {
   detectedAt: number; // sender's clock (message `at`)
   origin: { node: string; device?: string; station?: string };
   note?: string;
+  target?: string; // id in the location table the threat is heading for (device or asset)
   /** Ranked node ids, primary first — the chain of responsibility. */
   chain: string[];
   responsibleIndex: number; // index into chain; -1 = nobody (no coverage)
@@ -57,6 +59,7 @@ export interface Track {
   positions: TrackPosition[]; // G2: trajectory (capped)
   lastUpdateAt?: number; // receiver clock of the last position
   lostAt?: number;
+  impactAt?: number;
 }
 
 export interface EngagementContext {
@@ -87,7 +90,7 @@ export function createEngagement(): EngagementState {
 }
 
 export const LIFECYCLE_KINDS = new Set([
-  "gcs.signal", "track.detected", "track.update", "track.engaging", "track.handover", "track.neutralised", "track.lost",
+  "gcs.signal", "track.detected", "track.update", "track.engaging", "track.handover", "track.neutralised", "track.lost", "track.impact",
 ]);
 export const isDetection = (kind: string) => kind === "gcs.signal" || kind === "track.detected";
 
@@ -123,6 +126,7 @@ export function applyMessage(st: EngagementState, m: MeshMessage, ctx: Engagemen
       trackId: id, threat, detectedAt: m.at,
       origin: { node: m.from.node, device: m.from.device, station: m.from.station },
       note: typeof m.body.note === "string" ? m.body.note : undefined,
+      target: typeof m.body.target === "string" ? m.body.target : undefined,
       chain: ranked, responsibleIndex: ranked.length ? 0 : -1, responsibleSince: ctx.now,
       state: "detected", escalations: [], rejected: [], positions: [],
     };
@@ -181,7 +185,7 @@ export function applyMessage(st: EngagementState, m: MeshMessage, ctx: Engagemen
     }
     case "track.neutralised": {
       if (t.state === "neutralised") return t;
-      if (t.state === "lost") { reject(t, m, ctx, "track already lost"); return t; }
+      if (!isLive(t)) { reject(t, m, ctx, `track already ${t.state}`); return t; }
       const override = m.body.override === true;
       if (!override && !authorised(t, m, ctx)) { reject(t, m, ctx, "not the responsible device"); return t; }
       t.state = "neutralised";
@@ -192,6 +196,20 @@ export function applyMessage(st: EngagementState, m: MeshMessage, ctx: Engagemen
       if (!isLive(t)) return t;
       t.state = "lost";
       t.lostAt = ctx.now;
+      return t;
+    }
+    case "track.impact": {
+      // The threat reached its target while still live: the defence leaked.
+      // Only the track's origin (the simulator / sensor that owns it) may say so.
+      if (!isLive(t)) return t;
+      if (m.from.device !== t.origin.device) { reject(t, m, ctx, "only the track's origin may report impact"); return t; }
+      t.state = "impact";
+      t.impactAt = ctx.now;
+      const b = m.body as Partial<TrackPosition>;
+      if (typeof b.lat === "number" && typeof b.lng === "number") {
+        const last = t.positions.at(-1);
+        t.positions.push({ seq: (last?.seq ?? 0) + 1, t: m.at, lat: b.lat, lng: b.lng });
+      }
       return t;
     }
   }
