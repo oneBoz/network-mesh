@@ -142,9 +142,11 @@ cd backend-network-mesh && MESH_KEY=wrong-key npx tsx src/node.ts --id intruder 
 The tab's **rejected packets** counter climbs and the log shows
 `REJECTED packet from 127.0.0.1:4099` in red. `Ctrl-C` the intruder.
 
-*Every packet is HMAC-signed with the mesh key; a node without it cannot join,
-cannot be heard, cannot inject a threat. The key is shared out of band and
-rotated by restarting with a new one.*
+*Every packet is encrypted and authenticated with a key derived from the mesh
+key — AES-256-GCM, nothing but Node's built-in crypto. A node without it
+cannot join, cannot be heard, cannot inject a threat, and cannot read what the
+mesh says. The key is shared out of band and rotated by restarting with a new
+one.*
 
 ## What is real and what is simulated
 
@@ -153,13 +155,14 @@ Judges will ask. Answer plainly:
 - **Real:** the membership protocol, failure detection, NAT traversal through
   the public lighthouse, the flooded data channel, deterministic matchmaking,
   the replicated engagement lifecycle with authorisation and escalation,
-  message signing. Two physical devices on different continents.
+  encrypted and replay-protected transport. Two physical devices on
+  different continents.
 - **Simulated:** the threats and their trajectories (the control plane drives
   them), the five "defence systems" (they are mesh nodes with a skill table,
   not sensors or effectors).
-- **Not done, by choice:** payload encryption (signing only), per-device
-  identities (one shared key — anyone holding it can claim any device name),
-  a real sensor feed. `PLAN.md` §6 has the design for each.
+- **Not done, by choice:** per-device identities (one shared key — anyone
+  holding it can claim any device name, and a leaked key exposes the whole
+  mesh), a real sensor feed. `PLAN.md` §6 has the design for each.
 
 ## Terminal equivalents
 

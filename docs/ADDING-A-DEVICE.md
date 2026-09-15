@@ -18,11 +18,12 @@ EXTRA_LIGHTHOUSES=<host:port,...>    # who to join — see below
 DEVICE_NAME=<short unique name>      # e.g. mini-a, gcs-laptop; shows up on every other dashboard
 ```
 
-**Getting the key.** `MESH_KEY` is the access key: every packet is signed
-with it and the lighthouse drops anything else, logging the rejected source.
+**Getting the key.** `MESH_KEY` is the access key: every packet is encrypted
+and authenticated with it (AES-256-GCM) and the lighthouse drops anything
+else, logging the rejected source.
 It is deliberately not in the repository. Copy it from an existing device's
 `.env` and send it over a private channel (not git, not a screenshot in a
-public chat). Anyone without it sees `REJECTED packet ... bad HMAC signature`
+public chat). Anyone without it sees `REJECTED packet ... authentication failed`
 in the lighthouse log and never joins. If it ever leaks, rotate: generate a
 new one with `openssl rand -hex 32`, set it in every device's `.env`, and
 `docker compose up -d` everywhere.
@@ -141,7 +142,7 @@ curl -s -X POST localhost:7070/api/signal -H 'content-type: application/json' \
 
 | Symptom | Cause / fix |
 |---|---|
-| Header shows no remotes after 30 s | `MESH_KEY` differs (nodes log `bad HMAC signature`), `EXTRA_LIGHTHOUSES` typo, or outbound UDP blocked. `docker compose logs -f` and look for `joined mesh — learned N peers` on each node. |
+| Header shows no remotes after 30 s | `MESH_KEY` differs (nodes log `authentication failed`), the other device runs a pre-encryption build (`unknown frame version`), `EXTRA_LIGHTHOUSES` typo, or outbound UDP blocked. `docker compose logs -f` and look for `joined mesh — learned N peers` on each node. |
 | Remote nodes flicker between alive and suspect | Two devices behind the same router using public addresses — use section 2. Or the other device runs an older build — `docker compose up -d --build` there. |
 | `id conflict` in a lighthouse log | Two devices with the same `DEVICE_NAME` (or a device booted with no `EXTRA_LIGHTHOUSES`, giving plain ids that collide with a hub's). Make names unique. |
 | `timestamp outside the replay window` | Clocks differ by more than 60 s. Enable NTP on both machines. |

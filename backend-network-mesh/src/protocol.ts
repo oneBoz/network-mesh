@@ -2,14 +2,23 @@
  * protocol.ts — shared wire format for the mesh.
  *
  * Messages are JSON over UDP. If the MESH_KEY environment variable is set,
- * every message is framed as `<hex sig>\n<timestamp>\n<json>` where the sig
- * is HMAC-SHA256 over `<timestamp>\n<json>`; unsigned, invalid, or stale
- * (replayed) frames are silently dropped. That gives you cheap "only my
- * servers can speak on this mesh" protection with zero dependencies.
- * (It is NOT encryption — payloads are readable on the wire. Nebula/WireGuard
- * solve that layer for real deployments.)
+ * every datagram is an authenticated-encryption frame:
+ *
+ *   0x02 | nonce (12 bytes, random) | AES-256-GCM( "<timestamp>\n<json>" ) | tag (16 bytes)
+ *
+ * The 256-bit frame key is HKDF-SHA256(MESH_KEY) bound to this frame format,
+ * so rotating MESH_KEY rotates it; the version byte is authenticated as
+ * associated data. Anyone without the key can neither read membership or
+ * threat traffic nor forge or alter a packet (GCM's tag fails), and a
+ * captured frame replayed later is dropped by the timestamp window. Every
+ * rejection reports why, because on the wire a key mismatch looks exactly
+ * like a dead peer. Without MESH_KEY the mesh speaks plaintext JSON (local
+ * demos only). Everything here is node:crypto — no dependencies.
+ *
+ * What this does NOT give you: per-device identities. One shared key means
+ * anyone holding it can claim any device name (PLAN.md Phase 6, Noise).
  */
-import { createHmac, timingSafeEqual } from "node:crypto";
+import { createCipheriv, createDecipheriv, hkdfSync, randomBytes } from "node:crypto";
 
 export type NodeStatus = "alive" | "suspect" | "dead";
 
@@ -124,54 +133,81 @@ export function trimToFit<T>(items: T[], build: (items: T[]) => Message, opts: {
   return arr;
 }
 
-const KEY = process.env.MESH_KEY ?? "";
-const REPLAY_WINDOW_MS = 60_000; // signed frames older (or more future-dated) than this are dropped
+const FRAME_VERSION = 0x02; // AES-256-GCM frame; 0x7b ('{') is plaintext JSON
+const NONCE_LEN = 12;
+const TAG_LEN = 16;
+/** Bytes an encrypted frame adds to the JSON: version + nonce + tag (+ the timestamp line, ~14). */
+export const FRAME_OVERHEAD = 1 + NONCE_LEN + TAG_LEN;
+const REPLAY_WINDOW_MS = 60_000; // frames older (or more future-dated) than this are dropped
 
-export function encode(msg: Message): Buffer {
-  const body = JSON.stringify(msg);
-  if (!KEY) return Buffer.from(body);
-  const ts = String(Date.now());
-  const sig = createHmac("sha256", KEY).update(`${ts}\n${body}`).digest("hex");
-  return Buffer.from(`${sig}\n${ts}\n${body}`);
+/** The frame key for a shared secret: HKDF-SHA256, bound to this format. `null` for no secret (plaintext). */
+export function deriveKey(secret: string): Buffer | null {
+  if (!secret) return null;
+  return Buffer.from(hkdfSync("sha256", secret, "network-mesh", "frame/aes-256-gcm/v2", 32));
 }
+const KEY = deriveKey(process.env.MESH_KEY ?? "");
+/** True when this process encrypts (MESH_KEY set). */
+export const ENCRYPTED = KEY !== null;
+
+export function encodeWith(msg: Message, key: Buffer | null, now = Date.now()): Buffer {
+  const body = JSON.stringify(msg);
+  if (!key) return Buffer.from(body);
+  const header = Buffer.from([FRAME_VERSION]);
+  const nonce = randomBytes(NONCE_LEN); // 96-bit random nonce: fine for far fewer than 2^32 frames per key — rotate MESH_KEY now and then
+  const cipher = createCipheriv("aes-256-gcm", key, nonce, { authTagLength: TAG_LEN });
+  cipher.setAAD(header);
+  const ct = Buffer.concat([cipher.update(`${now}\n${body}`, "utf8"), cipher.final()]);
+  return Buffer.concat([header, nonce, ct, cipher.getAuthTag()]);
+}
+export const encode = (msg: Message): Buffer => encodeWith(msg, KEY);
 
 /** `onDrop` (when given) is told WHY a frame was rejected — a key or clock
  *  mismatch is otherwise indistinguishable from a dead peer on the wire,
  *  which makes it nearly undebuggable in the field. */
-export function decode(buf: Buffer, onDrop?: (reason: string) => void): Message | null {
+export function decodeWith(buf: Buffer, key: Buffer | null, onDrop?: (reason: string) => void, now = Date.now()): Message | null {
   try {
-    const text = buf.toString("utf8");
-    if (text.startsWith("{")) {
-      if (KEY) {
-        onDrop?.("unsigned packet on a signed mesh — MESH_KEY mismatch?");
+    if (!buf.length) return null;
+    if (buf[0] === 0x7b) { // '{' — plaintext JSON
+      if (key) {
+        onDrop?.("plaintext packet on an encrypted mesh — MESH_KEY mismatch?");
         return null;
       }
-      return JSON.parse(text) as Message;
+      return JSON.parse(buf.toString("utf8")) as Message;
     }
-    if (!KEY) {
-      onDrop?.("signed frame on an unsigned mesh — MESH_KEY mismatch?");
+    if (!key) {
+      onDrop?.("encrypted frame on a plaintext mesh — set MESH_KEY here too");
       return null;
     }
-    const first = text.indexOf("\n");
-    const second = text.indexOf("\n", first + 1);
-    if (first === -1 || second === -1) return null;
-    const ts = text.slice(first + 1, second);
-    const body = text.slice(second + 1);
-    const want = createHmac("sha256", KEY).update(`${ts}\n${body}`).digest();
-    const got = Buffer.from(text.slice(0, first), "hex");
-    if (got.length !== want.length || !timingSafeEqual(want, got)) {
-      onDrop?.("bad HMAC signature — MESH_KEY mismatch?");
+    if (buf[0] !== FRAME_VERSION) {
+      onDrop?.(`unknown frame version 0x${buf[0].toString(16)} — peer on an older build (HMAC frames are gone)?`);
       return null;
     }
-    if (Math.abs(Date.now() - Number(ts)) > REPLAY_WINDOW_MS) {
-      onDrop?.("timestamp outside the replay window — clock skew between machines?");
+    if (buf.length < FRAME_OVERHEAD + 2) return null;
+    const nonce = buf.subarray(1, 1 + NONCE_LEN);
+    const ct = buf.subarray(1 + NONCE_LEN, buf.length - TAG_LEN);
+    const tag = buf.subarray(buf.length - TAG_LEN);
+    const decipher = createDecipheriv("aes-256-gcm", key, nonce, { authTagLength: TAG_LEN });
+    decipher.setAAD(buf.subarray(0, 1));
+    decipher.setAuthTag(tag);
+    let text: string;
+    try {
+      text = Buffer.concat([decipher.update(ct), decipher.final()]).toString("utf8");
+    } catch {
+      onDrop?.("authentication failed — MESH_KEY mismatch, or the packet was altered");
       return null;
     }
-    return JSON.parse(body) as Message;
+    const nl = text.indexOf("\n");
+    if (nl === -1) return null;
+    if (Math.abs(now - Number(text.slice(0, nl))) > REPLAY_WINDOW_MS) {
+      onDrop?.("timestamp outside the replay window — clock skew between machines, or a replayed packet?");
+      return null;
+    }
+    return JSON.parse(text.slice(nl + 1)) as Message;
   } catch {
     return null;
   }
 }
+export const decode = (buf: Buffer, onDrop?: (reason: string) => void): Message | null => decodeWith(buf, KEY, onDrop);
 
 /** The address to record for a peer whose packet just arrived from `rinfo`:
  *  its advertised host if it declared one, otherwise the observed source. */

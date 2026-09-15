@@ -54,8 +54,9 @@ centralindia, koreacentral, malaysiawest, and only arm64 B-series had capacity.
 
 ### Shared secret (= access key to the mesh)
 
-Every packet is HMAC-signed with `MESH_KEY`; the Azure lighthouse and every
-node drop anything signed with a different key and log the rejected source.
+Every packet is encrypted and authenticated with a key derived from
+`MESH_KEY` (AES-256-GCM, since 2026-09-15); the Azure lighthouse and every
+node drop anything under a different key and log the rejected source.
 The key is **not in the repo**: it lives only in each device's `.env` (Mac,
 mac02, and `~/network-mesh/.env` on the VM). Rotated on 2026-09-14 evening
 to a random 64-hex-char value generated with `openssl rand -hex 32`; the old
@@ -78,7 +79,8 @@ refuse to start without one (`REQUIRE_MESH_KEY`).
   well before launching (DEMO.md does). Fix candidates: require `dead` to
   persist for one suspect window before escalating, or re-derive the
   responsible index from the chain and current membership each tick.
-- No encryption yet (HMAC-signed plaintext). Roadmap Phase 6.
+- One shared key, no per-device identity: any key holder can claim any
+  device name; a leaked key exposes the whole mesh. Phase 6 (Noise/Ed25519).
 - Node query API (`/members`, `/threat`, `/send`) is unauthenticated on
   `0.0.0.0`; only UDP is opened on the VM firewall, so it is not reachable
   there, but Phase 1 of the plan (bearer token) is still to do.
@@ -293,6 +295,31 @@ stream + map → offline fallback and scenarios.
 - Docs: `docs/DEMO.md` (judge runbook), README sections, backend API list.
 - `scripts/smoke.mjs` now requires identical alive sets for 3 consecutive
   polls before firing: right after a boot, views of remote peers still flap.
+
+### 2026-09-15 — Encryption: AES-256-GCM frames replace HMAC signing
+
+- `src/protocol.ts`: every datagram is now `0x02 | nonce(12) | AES-256-GCM(
+  "<ts>\n<json>") | tag(16)`, key = HKDF-SHA256(MESH_KEY, "network-mesh",
+  "frame/aes-256-gcm/v2"); version byte is authenticated as AAD; 60 s replay
+  window kept. 29 bytes overhead (HMAC framing was ~80), so `MAX_DATAGRAM`
+  is unchanged. `encodeWith/decodeWith/deriveKey` exported for tests;
+  `test/protocol.test.ts` (6 tests: round trip, nonce uniqueness, payload
+  hidden, wrong key / bit flip / truncation, replay, mixed configs, old HMAC
+  frame reported as "older build", max-size datagram).
+- Drop reasons renamed: `authentication failed — MESH_KEY mismatch, or the
+  packet was altered`, `plaintext packet on an encrypted mesh`, `unknown
+  frame version … older build`. Lighthouse/node banners and the Lighthouse
+  mode badge say ENCRYPTED / PLAINTEXT.
+- **Not backward compatible**: a device on a pre-encryption build is rejected
+  with `unknown frame version`. Rebuild every device (Mac, VM done; mac02
+  pending).
+- Verified: wrong-key intruder rejected and counted on lh-5001
+  (`authentication failed`), zero peers learned; smoke PASS on both devices;
+  cross-device scenario streamed encrypted with 5/5 agreement on both sides.
+- When two devices are rebuilt within a minute of each other their fleets
+  join while the other side is still down and only merge on the next
+  announce cycles (the lighthouse answers announces with a peer list) — allow
+  ~2 minutes before judging agreement, or rebuild one device at a time.
 
 ## Verifying a build (checklist)
 

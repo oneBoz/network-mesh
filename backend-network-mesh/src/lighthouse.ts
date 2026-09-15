@@ -39,7 +39,7 @@ const log = makeLogger(`lighthouse:${PORT}`);
 // VPS compose files) refuses to start unsigned at all, so a forgotten key can
 // never silently expose the mesh.
 if (process.env.REQUIRE_MESH_KEY && !process.env.MESH_KEY) {
-  log("REQUIRE_MESH_KEY is set but MESH_KEY is empty — refusing to run a public lighthouse unsigned");
+  log("REQUIRE_MESH_KEY is set but MESH_KEY is empty — refusing to run a public lighthouse in plaintext");
   process.exit(1);
 }
 
@@ -173,4 +173,4 @@ if (HTTP_PORT) {
     .listen(HTTP_PORT, "127.0.0.1", () => log(`registry API on http://127.0.0.1:${HTTP_PORT}/registry (loopback only)`));
 }
 
-sock.bind(PORT, () => log(`lighthouse listening on udp/${PORT}${process.env.MESH_KEY ? " (HMAC signing ON — only holders of MESH_KEY can join)" : " (UNSIGNED — anyone can join; set MESH_KEY)"}`));
+sock.bind(PORT, () => log(`lighthouse listening on udp/${PORT}${process.env.MESH_KEY ? " (encrypted: AES-256-GCM — only holders of MESH_KEY can join)" : " (PLAINTEXT — anyone can join and read; set MESH_KEY)"}`));

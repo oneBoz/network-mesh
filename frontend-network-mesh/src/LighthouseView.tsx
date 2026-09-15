@@ -32,7 +32,7 @@ export function LighthouseModeView({ state, events }: { state: MeshState; events
             <span><b>{unique.size}</b> nodes registered on <b>{devices.size}</b> device{devices.size === 1 ? "" : "s"}</span>
             <span><b>{joins}</b> joins since start</span>
             <span className={rejected ? "lh-bad" : undefined}><b>{rejected}</b> packets rejected{rejected ? " — someone without the key is knocking" : ""}</span>
-            <span>{signing ? <span className="agree-tag">signing ON — key required to join</span> : <span className="agree-tag bad">UNSIGNED — anyone can join</span>}</span>
+            <span>{signing ? <span className="agree-tag">ENCRYPTED (AES-256-GCM) — key required to join</span> : <span className="agree-tag bad">PLAINTEXT — anyone can join and read</span>}</span>
           </div>
         ) : (
           <div className="muted" style={{ fontSize: 13 }}>

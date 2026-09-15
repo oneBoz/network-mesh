@@ -6,7 +6,7 @@ The dashboard UI lives in its own repo: **frontend-network-mesh** (Vite + React)
 
 ## Layout
 
-    src/protocol.ts        Wire format, message types, optional HMAC signing
+    src/protocol.ts        Wire format, message types, AES-256-GCM framing (MESH_KEY)
     src/skills.ts          Defense skill table + deterministic threat matchmaking
     src/swim.ts            SWIM membership engine (pure state machine, no I/O)
     src/lighthouse.ts      Join broker — never in the data path
@@ -37,7 +37,7 @@ The demo mesh runs one server site per defense system:
     npm run typecheck # verify everything compiles
 
 Optional: put `MESH_KEY=<shared secret>` in your environment before starting
-anything if you want signed gossip — the control plane passes it through to
+anything if you want encrypted gossip — the control plane passes it through to
 every process it spawns.
 
 ## Run the control plane
@@ -50,7 +50,7 @@ Environment knobs, all optional:
 
 | Variable | Default | Effect |
 |---|---|---|
-| `MESH_KEY` | unset | Shared HMAC secret passed to every child; unsigned packets are dropped when set |
+| `MESH_KEY` | unset | Shared secret passed to every child; frames are AES-256-GCM encrypted with a key derived from it, and plaintext or foreign frames are dropped when set |
 | `EXTRA_LIGHTHOUSES` | unset | `host:port,...` of lighthouses on other machines; every spawned node joins them too (this is how one dashboard's fleet merges with peers across the internet) |
 | `HOST` / `PORT` | `127.0.0.1` / `7070` | Bind address of the control API. Only Docker sets `HOST=0.0.0.0`; the compose port mapping is loopback-only on the host |
 | `DEVICE_NAME` | hostname | Passed to every node as `--device`; also suffixes demo node ids (`aegis-<device>`) whenever the fleet joins external lighthouses or advertises, so several devices can boot the demo into one mesh |
@@ -149,9 +149,15 @@ otherwise the lighthouse records it as `127.0.0.1` and hands that out:
 Everything else keeps trusting the *observed* UDP source address, which is what
 makes NAT hole punching work for nodes behind home routers (see the root README).
 
-Optional message signing (built-in crypto, satisfies "only my servers can talk"):
+Optional encryption (built-in crypto — confidentiality, integrity and replay
+protection in one AEAD frame; "only my servers can talk, and nobody else can
+listen"):
 
-    export MESH_KEY=some-shared-secret   # set on every process; unsigned packets are dropped
+    export MESH_KEY=some-shared-secret   # set on every process; plaintext or foreign frames are dropped
+
+Frame: `0x02 | 12-byte nonce | AES-256-GCM("<ts>\n<json>") | 16-byte tag`,
+key = HKDF-SHA256(MESH_KEY). 29 bytes of overhead, so the datagram budget in
+`protocol.ts` is unchanged. Tests: `test/protocol.test.ts`.
 
 ## Query the mesh
 
@@ -234,7 +240,7 @@ label (default hostname) that rides along in `from.device`.
 | `lighthouse.ts` | Nebula lighthouses |
 | SWIM loop in `node.ts` + `swim.ts` | Consul/Serf memberlist gossip |
 | `/resolve/<service>` | `service.service.consul` DNS |
-| `MESH_KEY` HMAC | Nebula certificates + Noise encryption |
+| `MESH_KEY` AES-256-GCM (one shared key) | Nebula certificates + Noise (per-host identities) |
 | (not included) | Encrypted tunnels, NAT traversal, Prometheus metrics |
 
 ## Robustness features
@@ -250,11 +256,11 @@ label (default hostname) that rides along in `from.device`.
 - **Timer profiles.** `MESH_PROFILE=local|internet|mobile` picks a preset (mobile: ack 1 s, indirect 1.5 s, suspect 10 s, keepalive 5 s); `PROTOCOL_PERIOD_MS`, `ACK_TIMEOUT_MS`, `INDIRECT_TIMEOUT_MS`, `SUSPECT_TIMEOUT_MS`, `KEEPALIVE_MS` override individual values.
 - **Relay-aware probing.** After three direct probes to a peer are lost but a relayed ack rescues each, the node stops trying the direct path first and probes that peer through helpers; it retries the direct path every 30 s (`DIRECT_RETRY_MS`). `/members` reports `paths` and the dashboard marks such peers "via relay". This is what keeps two hotspot devices (or two laptops behind one non-hairpinning router) quiet instead of timing out every round.
 - **Address changes.** Join/announce carry the node's incarnation; a lighthouse accepts the same id from a *new* address at once when the incarnation is higher (the node refuted the suspicions its old mapping caused), and a node re-announces to a lighthouse (rate-limited) whenever it refutes a suspicion. A hotspot handover therefore propagates within seconds instead of waiting out the 45 s id-conflict guard.
-- **Visible drops.** With `MESH_KEY` set, rejected frames log *why* (key mismatch, clock skew) and *from where* (source address, throttled per source, with a running count on lighthouses) instead of silently impersonating a dead peer. `REQUIRE_MESH_KEY=1` makes a lighthouse refuse to start unsigned — set on every public lighthouse.
+- **Visible drops.** With `MESH_KEY` set, rejected frames log *why* (key mismatch or tampering, clock skew, a peer on an older build) and *from where* (source address, throttled per source, with a running count on lighthouses) instead of silently impersonating a dead peer. `REQUIRE_MESH_KEY=1` makes a lighthouse refuse to start in plaintext — set on every public lighthouse.
 - **Duplicate-ID guard.** A lighthouse refuses a join for an id that is actively registered from a different address — two machines can't fight an incarnation war over one identity.
 
 ## Known simplifications
 
-- **HMAC signs but doesn't encrypt.** Signed frames carry a timestamp and are rejected outside a 60s window (replay protection), but payloads are readable on the wire. For real deployments, run this traffic inside Nebula/WireGuard, or add Node's built-in TLS/DTLS.
+- **One shared key, no identities.** Frames are encrypted and authenticated (AES-256-GCM) and rejected outside a 60 s window (replay protection), but every device holds the same key, so a leaked key exposes the whole mesh and any holder can claim any device name. Per-device keys and a Noise handshake are the next step (PLAN.md Phase 6).
 - **Membership persistence only.** The saved peer list is a rejoin bootstrap; a restarted node still starts with a fresh view (which gossip repopulates in seconds).
 - **No NAT keepalive tuning.** Hole-punched NAT mappings can expire between probes on very quiet meshes; real deployments (Nebula) send explicit keepalives per tunnel.

@@ -94,7 +94,7 @@ squeezed to fit one screen.
 - **Lighthouse** shows what this device's lighthouses see: each one's registry
   (who is registered, from which device, the address it hands out, incarnation,
   last seen), joins and **rejected packets** since start (someone knocking
-  with the wrong key), whether signing is on, and a log filtered to lighthouse
+  with the wrong key), whether encryption is on, and a log filtered to lighthouse
   events — joins in green, moves and conflicts in yellow, rejections in red.
   Each lighthouse exposes this on a loopback-only registry API
   (`--http`, ports 9001+), never on the network.
@@ -163,7 +163,7 @@ and streams new messages over SSE.
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `MESH_KEY` | placeholder | The mesh's access key: every packet is HMAC-signed with it and lighthouses/nodes reject anything else. Any value works locally; to join a real mesh get its key from the operator privately. Public lighthouses refuse to start without one. |
+| `MESH_KEY` | placeholder | The mesh's access key: every packet is encrypted and authenticated with a key derived from it (AES-256-GCM), so anyone without it can neither read nor forge traffic, and lighthouses/nodes reject anything else. Any value works locally; to join a real mesh get its key from the operator privately. Public lighthouses refuse to start without one. |
 | `EXTRA_LIGHTHOUSES` | empty | `host:port,host:port` of lighthouses on other machines. Every node the dashboard spawns joins them too. |
 | `DEVICE_NAME` | `local-device` (Docker) / hostname (native) | Label for this machine on other devices' dashboards and on the signals it sends; also the id suffix when several devices boot the demo. |
 | `ADVERTISE` | empty | Public IP of *this* host. Only for a dashboard running on a VPS (see the host-network override). |
@@ -266,8 +266,10 @@ How it works and what it needs:
 - Symmetric NAT (some mobile carriers and corporate networks) breaks direct
   probes between two NATed devices, but every device still reaches the VPS
   node, and the mesh keeps membership through it (indirect probes).
-- Encryption is the next step: traffic is HMAC-signed and replay-protected
-  but not encrypted. See PLAN.md for the WireGuard/Nebula/Noise options.
+- Traffic is encrypted end to end (AES-256-GCM, key derived from `MESH_KEY`
+  with HKDF, 60 s replay window). What is still missing is per-device
+  identity: one shared key means anyone holding it can claim any device name.
+  See PLAN.md Phase 6 for the Noise/Ed25519 design.
 
 **Several devices booting the demo.** Node ids must be unique across the whole
 mesh, so whenever a fleet joins external lighthouses (or advertises a public
@@ -317,7 +319,7 @@ those two devices should use. The compose file publishes UDP 4001-4008 and
 |---|---|
 | `http://localhost:7070` works but you tried 7000 and got `403 Forbidden` from `AirTunes` | macOS AirPlay Receiver owns port 7000 on every Mac. The dashboard deliberately uses **7070**. |
 | `docker compose up` fails binding a UDP port | Another mesh instance (native or Docker) is running. Stop it, or remove the UDP `ports:` lines (they are only needed for peers on other machines). |
-| Nodes log `dropping packets: bad HMAC signature` | `MESH_KEY` differs between machines. |
+| Nodes log `authentication failed — MESH_KEY mismatch` | `MESH_KEY` differs between machines. `unknown frame version` means the other machine runs a build from before encryption — rebuild it. |
 | Nodes log `timestamp outside the replay window` | Clocks differ by more than 60 s. Enable NTP. |
 | Remote peer appears then goes `suspect`/`dead` | Its UDP port is not open, or a symmetric NAT is in the path. Check `vps-1` is reachable and the VPS firewall allows UDP 4001. |
 | Dashboard shows nothing after **Boot demo** | Check `docker compose logs` (or the terminal) for `EADDRINUSE`; the demo needs UDP 4001-4005, 5001-5003 and TCP 8001-8005 free inside its network namespace. |

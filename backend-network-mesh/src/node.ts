@@ -783,6 +783,6 @@ createServer((req, res) => {
 
 // ---------- boot ----------
 sock.bind(PORT, () => {
-  log(`up — udp/${PORT} gossip, http/${HTTP_PORT} queries, service=${SERVICE ?? "none"}, device=${DEVICE}, profile=${PROFILE_NAME}${ADVERTISE ? `, advertising ${ADVERTISE}` : ""}${process.env.MESH_KEY ? ", HMAC ON" : ""}`);
+  log(`up — udp/${PORT} gossip, http/${HTTP_PORT} queries, service=${SERVICE ?? "none"}, device=${DEVICE}, profile=${PROFILE_NAME}${ADVERTISE ? `, advertising ${ADVERTISE}` : ""}${process.env.MESH_KEY ? ", encrypted (AES-256-GCM)" : ", PLAINTEXT"}`);
   tryJoin();
 });

@@ -18,7 +18,7 @@ services:
     image: network-mesh:0.1.0
     network_mode: host
     environment:
-      MESH_KEY: ${MESH_KEY:?set MESH_KEY — a public lighthouse must never run unsigned}
+      MESH_KEY: ${MESH_KEY:?set MESH_KEY — a public lighthouse must never run in plaintext}
       REQUIRE_MESH_KEY: "1"
     command: ["node", "--import", "tsx", "src/lighthouse.ts", "--port", "5001"]
     healthcheck: { disable: true }   # the image healthcheck probes the dashboard port, absent here
@@ -29,7 +29,7 @@ services:
     network_mode: host
     depends_on: [lighthouse]
     environment:
-      MESH_KEY: ${MESH_KEY:?set MESH_KEY — a public lighthouse must never run unsigned}
+      MESH_KEY: ${MESH_KEY:?set MESH_KEY — a public lighthouse must never run in plaintext}
     command:
       - node
       - --import

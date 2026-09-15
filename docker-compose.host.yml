@@ -18,5 +18,5 @@ services:
     environment:
       HOST: 127.0.0.1
       # Public host: the key is mandatory, and its lighthouses refuse to start without it.
-      MESH_KEY: ${MESH_KEY:?set MESH_KEY — a public lighthouse must never run unsigned}
+      MESH_KEY: ${MESH_KEY:?set MESH_KEY — a public lighthouse must never run in plaintext}
       REQUIRE_MESH_KEY: "1"
