@@ -7,6 +7,7 @@
  * it the hard way.
  */
 import { spawn } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import type { ChildProcess } from "node:child_process";
 import { hostname } from "node:os";
 import { dirname, join } from "node:path";
@@ -22,6 +23,10 @@ export const DEVICE_SLUG = DEVICE.toLowerCase().replace(/[^a-z0-9]+/g, "-").repl
  *  runs on a host with a public IP and joins a lighthouse over loopback —
  *  otherwise that lighthouse would record its nodes as 127.0.0.1. */
 export const ADVERTISE = process.env.ADVERTISE?.trim() || undefined;
+/** Bearer token every child's HTTP query API demands (except /health). Fresh and random
+ *  per control-plane start unless NODE_API_TOKEN is set — the node ports bind 0.0.0.0, so
+ *  without this anyone who can reach them could inject threats or read views. */
+export const NODE_API_TOKEN = process.env.NODE_API_TOKEN?.trim() || randomBytes(16).toString("hex");
 
 /** Repo root — cwd for children so `tsx` and src/ resolve. */
 export const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
@@ -98,7 +103,7 @@ export class ProcManager {
 
     const child = spawn(process.execPath, args, {
       cwd: ROOT,
-      env: process.env, // passes MESH_KEY through if set
+      env: { ...process.env, NODE_API_TOKEN }, // MESH_KEY passes through; the token gates the child's query API
       stdio: ["ignore", "pipe", "pipe"],
     });
     this.wireOutput(spec.name, child);

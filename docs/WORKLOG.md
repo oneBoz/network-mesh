@@ -70,15 +70,12 @@ refuse to start without one (`REQUIRE_MESH_KEY`).
 - `mac02` must be rebuilt on the current code and both Macs should list each
   other's **LAN** lighthouse (see the same-router note below). Until then the
   Mac side logs many false suspicions that originate on `mac02`.
-- **Escalation on transient convictions.** While a remote fleet is booting
-  (or churning), a local node can briefly convict a *local* peer dead; the
-  reducer escalates on the first `dead` it sees and never moves back, so nodes
-  that saw different flaps end up with different responsible nodes (seen
-  2026-09-15: two swarm tracks at 1/5 agree after the VM fleet was booted
-  seconds before the launch). Steady state is unaffected — boot every device
-  well before launching (DEMO.md does). Fix candidates: require `dead` to
-  persist for one suspect window before escalating, or re-derive the
-  responsible index from the chain and current membership each tick.
+>>>>
+<<<<
+- Node query API (`/members`, `/threat`, `/send`) is unauthenticated on
+====
+- ~~Node query API unauthenticated~~ — fixed 2026-09-15 (bearer token). Was:
+  Node query API (`/members`, `/threat`, `/send`) is unauthenticated on
 - One shared key, no per-device identity: any key holder can claim any
   device name; a leaked key exposes the whole mesh. Phase 6 (Noise/Ed25519).
 - Node query API (`/members`, `/threat`, `/send`) is unauthenticated on
@@ -320,6 +317,20 @@ stream + map → offline fallback and scenarios.
   join while the other side is still down and only merge on the next
   announce cycles (the lighthouse answers announces with a peer list) — allow
   ~2 minutes before judging agreement, or rebuild one device at a time.
+
+### 2026-09-15 — Pre-judging hardening: dead-grace escalation, node API token
+
+- `engagement.ts`: `EngagementContext.deadFor(node)` + `deadGraceMs`; `tick()`
+  escalates on a dead responsible node only once the conviction has held for
+  the grace window. `node.ts` supplies `membership.entry(id).since` and the
+  profile's (size-scaled) suspect timeout as the grace, so a false conviction
+  during churn — refuted within one suspect window — no longer moves
+  responsibility. Closes the "escalation on transient convictions" item.
+  Test: flap refuted → no escalation; held for the window → escalates (22).
+- `procman.ts` mints `NODE_API_TOKEN` (random per start unless set) and passes
+  it to every child; `node.ts` returns 401 on every query-API request without
+  `Authorization: Bearer <token>` (except `/health`); `server.ts` sends it
+  via `nodeFetch()`. Nodes started by hand without the variable stay open.
 
 ## Verifying a build (checklist)
 

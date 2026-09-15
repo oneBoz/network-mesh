@@ -28,7 +28,7 @@ encrypted and authenticated using well-known open-source components.
 | Gap | Where | Why it matters over the internet |
 |---|---|---|
 | ~~No encryption~~ (done 2026-09-15: AES-256-GCM frames keyed from `MESH_KEY`), but still no per-device identity — one shared key. | `src/protocol.ts` | On-path readers now see nothing; but one leaked key = whole mesh, and any holder can claim any device name. |
-| Node query API listens on all interfaces with no auth. `POST /threat` is open. | `src/node.ts` `listen(HTTP_PORT)` | On a VPS or a permissive network anyone can inject threats or read views. |
+| ~~Node query API listens on all interfaces with no auth~~ (done 2026-09-15: bearer token `NODE_API_TOKEN`, random per control-plane start, on everything but `/health`). | `src/node.ts` `listen(HTTP_PORT)` | On a VPS or a permissive network anyone can inject threats or read views. |
 | Control plane hard-codes `127.0.0.1` for lighthouses and for polling nodes. | `backend/src/procman.ts` `lighthouseAddrs()`, `backend/src/server.ts` `pollNode()` | The dashboard can only see processes it spawned on the same machine. |
 | Every lighthouse/node is a child of the dashboard; there is no long-lived per-device agent, no config, no persisted identity. | `backend/src/procman.ts` | A device needs one process that survives reboots and knows who it is. |
 | NAT: hole punching works for cone NATs only. Symmetric NAT (many mobile carriers, some corporate) and CGNAT need a relay. | design | Two phones on LTE will never reach each other directly. |

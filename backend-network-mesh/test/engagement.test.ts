@@ -189,3 +189,17 @@ test("late joiner: replaying the whole log in one burst reaches the same lifecyc
   assert.equal(summary(late), summary(live));
   assert.match(summary(live), /"s":"neutralised".*"pos":\[0,1,2,3\]/);
 });
+
+test("a dead conviction escalates only after it has held for the grace window — a flap that is refuted changes nothing", () => {
+  const st = createEngagement();
+  applyMessage(st, msg("gcs.signal", GCS_MAC, { threat: "missile" }, 1000, "t1"), ctx(1000), CHAIN);
+  const graced = (now: number, deadMs: number): EngagementContext =>
+    ({ ...ctx(now, ["aegis-vm"]), deadFor: (n) => (n === "aegis-vm" ? deadMs : 0), deadGraceMs: 5_000 });
+  assert.equal(tick(st, graced(2000, 1_000)).length, 0, "convicted one second ago: wait");
+  assert.equal(responsibleNode(st.tracks.get("t1")!), "aegis-vm");
+  assert.equal(tick(st, ctx(3000)).length, 0, "refuted — alive again, no escalation ever happened");
+  assert.equal(st.tracks.get("t1")!.escalations.length, 0);
+  assert.equal(tick(st, graced(9000, 5_000)).length, 1, "held for the whole window: escalate");
+  assert.equal(responsibleNode(st.tracks.get("t1")!), "aegis-mac");
+  assert.equal(st.tracks.get("t1")!.escalations[0].reason, "dead");
+});

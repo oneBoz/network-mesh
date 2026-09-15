@@ -66,6 +66,13 @@ export interface EngagementContext {
   now: number; // receiver clock
   deviceOf: (nodeId: string) => string | undefined; // from membership (self included)
   isAlive: (nodeId: string) => boolean; // from membership (self counts as alive)
+  /** How long (ms) the node has been convicted dead in the local view; 0 if it is not dead.
+   *  Optional: when absent a dead conviction escalates at once. */
+  deadFor?: (nodeId: string) => number;
+  /** A dead conviction must have held this long before it escalates responsibility. A false
+   *  conviction during churn is refuted within about one suspect window; escalating on the
+   *  first tick that saw it made nodes that saw different flaps diverge for good. */
+  deadGraceMs?: number;
   engageTimeoutMs: (threat: ThreatType) => number;
   lostAfterMs: number; // no position update for this long ⇒ lost (tracks with positions only)
 }
@@ -257,7 +264,8 @@ export function tick(st: EngagementState, ctx: EngagementContext): Track[] {
       continue;
     }
     const node = responsibleNode(t);
-    if (node && !ctx.isAlive(node)) {
+    const deadLongEnough = node !== undefined && !ctx.isAlive(node) && (ctx.deadFor?.(node) ?? Infinity) >= (ctx.deadGraceMs ?? 0);
+    if (node && deadLongEnough) {
       advance(t, "dead", ctx);
       changed.push(t);
     } else if (node && ctx.now - t.responsibleSince > ctx.engageTimeoutMs(t.threat)) {

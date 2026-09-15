@@ -38,6 +38,9 @@ import { matchmake, SKILL_TABLE, THREAT_TYPES, toAssignment } from "./skills.js"
 // ---------- config ----------
 const args = parseArgs(process.argv.slice(2));
 const ID = args.id ?? `node-${Math.random().toString(36).slice(2, 7)}`;
+// Query-API access token (NODE_API_TOKEN, set by the control plane for every child).
+// When present, every HTTP request except /health must carry `Authorization: Bearer <token>`.
+const API_TOKEN = process.env.NODE_API_TOKEN?.trim() ?? "";
 const PORT = Number(args.port ?? 4001);
 const HTTP_PORT = Number(args.http ?? PORT + 4000);
 const SERVICE = args.service;
@@ -294,6 +297,8 @@ function lifecycleCtx(): EngagementContext {
     now: Date.now(),
     deviceOf: (id) => (id === ID ? DEVICE : membership.allPeers().find((p) => p.id === id)?.device),
     isAlive: (id) => id === ID || membership.alivePeers().some((p) => p.id === id),
+    deadFor: (id) => { const e = membership.entry(id); return e?.status === "dead" ? Date.now() - e.since : 0; },
+    deadGraceMs: suspectTimeoutMs(), // a false conviction is refuted within about one suspect window
     engageTimeoutMs: (threat) => ENGAGE_TIMEOUT_OVERRIDE ?? DEFAULT_ENGAGE_TIMEOUT_MS[threat],
     lostAfterMs: DEFAULT_LOST_AFTER_MS,
   };
@@ -697,6 +702,11 @@ createServer((req, res) => {
   // just reached us at req.socket.localAddress, so report that for `self`.
   const selfHost = req.socket.localAddress?.replace(/^::ffff:/, "") ?? self.host;
   res.setHeader("content-type", "application/json");
+  if (API_TOKEN && url !== "/health" && req.headers.authorization !== `Bearer ${API_TOKEN}`) {
+    res.statusCode = 401;
+    res.end(JSON.stringify({ error: "unauthorized — this node's query API needs its control plane's token (Authorization: Bearer <NODE_API_TOKEN>)" }));
+    return;
+  }
   if (url === "/send" && req.method === "POST") {
     const chunks: Buffer[] = [];
     req.on("data", (c: Buffer) => chunks.push(c));

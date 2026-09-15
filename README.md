@@ -169,6 +169,7 @@ and streams new messages over SSE.
 | `ADVERTISE` | empty | Public IP of *this* host. Only for a dashboard running on a VPS (see the host-network override). |
 | `MESH_PROFILE` | `local` | Timer preset: `local`, `internet`, or `mobile` for a phone hotspot / carrier NAT (longer ack and suspect windows, 5 s keepalive). |
 | `DATA_DIR` | `/data` (Docker) / `.data` (native) | Where the control plane persists the location table. |
+| `NODE_API_TOKEN` | random per start | Bearer token the control plane hands every node it spawns; a node's query API (`/members`, `/send`, `/threat`…) answers only requests that carry it. Set it yourself only if you want to `curl` a node directly. |
 
 Sample data is built in: the 5 defense systems and their skill table live in
 [`backend-network-mesh/src/skills.ts`](backend-network-mesh/src/skills.ts);

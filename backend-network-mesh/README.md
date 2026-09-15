@@ -56,6 +56,7 @@ Environment knobs, all optional:
 | `DEVICE_NAME` | hostname | Passed to every node as `--device`; also suffixes demo node ids (`aegis-<device>`) whenever the fleet joins external lighthouses or advertises, so several devices can boot the demo into one mesh |
 | `ADVERTISE` | unset | Public host of this machine, passed to every node as `--advertise` (dashboard running on a VPS) |
 | `FRONTEND_DIST` | `../frontend-network-mesh/dist` | Where to serve the dashboard build from |
+| `NODE_API_TOKEN` | random per start | Handed to every child; a node's HTTP query API (everything but `/health`) answers only requests with `Authorization: Bearer <token>`. Set it to a known value to query nodes by hand |
 
 Then start the frontend dev server from the **frontend-network-mesh** repo
 (`npm run dev` there, UI on http://localhost:5173), or `POST /api/demo` and
@@ -166,6 +167,11 @@ Ask **any** node — each answers from its own gossip-derived view, exactly like
     curl -s localhost:8001/members         # maelstrom's full membership view
     curl -s localhost:8001/resolve/aegis   # healthy AEGIS instances, per maelstrom
     curl -s localhost:8004/resolve/aegis   # same question to edgefuse — should converge to the same answer
+
+Nodes spawned by the control plane demand its token (see `NODE_API_TOKEN`):
+start the control plane with `NODE_API_TOKEN=dev` and add
+`-H 'Authorization: Bearer dev'` to the curls above. Nodes started by hand
+without the variable stay open, as in the demo script. `/health` never needs it.
 
 ## Threat matchmaking — the mesh as one entity
 

@@ -51,7 +51,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { createServer as createTcpServer } from "node:net";
 import { readFile, stat } from "node:fs/promises";
 import { extname, join, normalize } from "node:path";
-import { ADVERTISE, DEVICE, DEVICE_SLUG, ProcManager, ROOT } from "./procman.js";
+import { ADVERTISE, DEVICE, DEVICE_SLUG, NODE_API_TOKEN, ProcManager, ROOT } from "./procman.js";
 import { GeoStore } from "./geo.js";
 import { Simulator } from "./simulator.js";
 import { SCENARIOS, ScenarioRunner, seedEntries } from "./scenarios.js";
@@ -66,6 +66,10 @@ const HOST = process.env.HOST ?? "127.0.0.1";
 // 7070, not 7000: macOS Control Center (AirPlay Receiver) listens on *:7000 on
 // every stock Mac and answers HTTP with a bare 403, which is very confusing.
 const POLL_MS = 1_000;
+/** fetch() against a child's loopback HTTP API, carrying the token every node demands. */
+function nodeFetch(url: string, init: RequestInit = {}): Promise<Response> {
+  return fetch(url, { ...init, headers: { ...(init.headers as Record<string, string> | undefined), authorization: `Bearer ${NODE_API_TOKEN}` } });
+}
 const POLL_TIMEOUT_MS = 600;
 // The dashboard lives in its own repo. Serve its production build when one
 // exists; FRONTEND_DIST overrides the default sibling-checkout location.
@@ -112,7 +116,7 @@ async function sendMessage(kind: string, body: Record<string, unknown>, station?
   const target = nodes[Math.floor(Math.random() * nodes.length)];
   if (!target) return null;
   try {
-    const r = await fetch(`http://127.0.0.1:${target.httpPort}/send`, {
+    const r = await nodeFetch(`http://127.0.0.1:${target.httpPort}/send`, {
       method: "POST", headers: { "content-type": "application/json" },
       body: JSON.stringify({ kind, body, station }), signal: AbortSignal.timeout(1_000),
     });
@@ -128,7 +132,7 @@ async function resendMessage(id: string): Promise<boolean> {
   const nodes = procman.list().filter((p) => p.kind === "node" && p.running && p.httpPort).sort(() => Math.random() - 0.5);
   for (const n of nodes.slice(0, 2)) {
     try {
-      const r = await fetch(`http://127.0.0.1:${n.httpPort}/send`, {
+      const r = await nodeFetch(`http://127.0.0.1:${n.httpPort}/send`, {
         method: "POST", headers: { "content-type": "application/json" },
         body: JSON.stringify({ resend: id }), signal: AbortSignal.timeout(1_000),
       });
@@ -173,7 +177,7 @@ interface NodeInboxEntry {
 async function pollInbox(node: string, httpPort: number): Promise<void> {
   try {
     const after = inboxCursor.get(node) ?? 0;
-    const r = await fetch(`http://127.0.0.1:${httpPort}/inbox?after=${after}`, {
+    const r = await nodeFetch(`http://127.0.0.1:${httpPort}/inbox?after=${after}`, {
       signal: AbortSignal.timeout(POLL_TIMEOUT_MS),
     });
     const body = (await r.json()) as { messages: NodeInboxEntry[] };
@@ -274,7 +278,7 @@ async function pollNode(id: string, httpPort: number): Promise<NodeView> {
   try {
     // AbortSignal.timeout covers the body read too — a node that sends headers
     // then stalls mid-body would otherwise hang this poll slot forever.
-    const r = await fetch(`http://127.0.0.1:${httpPort}/members`, {
+    const r = await nodeFetch(`http://127.0.0.1:${httpPort}/members`, {
       signal: AbortSignal.timeout(POLL_TIMEOUT_MS),
     });
     const body = (await r.json()) as {
@@ -382,7 +386,7 @@ async function allocLighthouseSpec(port: number | undefined): Promise<ProcSpec> 
 async function pollTracks(nodes: ProcState[]): Promise<TrackView[]> {
   const per = await Promise.all(nodes.map(async (n) => {
     try {
-      const r = await fetch(`http://127.0.0.1:${n.httpPort}/tracks`, { signal: AbortSignal.timeout(POLL_TIMEOUT_MS) });
+      const r = await nodeFetch(`http://127.0.0.1:${n.httpPort}/tracks`, { signal: AbortSignal.timeout(POLL_TIMEOUT_MS) });
       return { node: n.name, tracks: ((await r.json()) as { tracks: Track[] }).tracks };
     } catch {
       return { node: n.name, tracks: [] as Track[] };
@@ -408,7 +412,7 @@ async function pollLighthouse(p: ProcState): Promise<LighthouseView> {
   const base: LighthouseView = { name: p.name, port: p.port, reachable: false, signing: false, registered: 0, rejected: 0, joins: 0, uptimeMs: 0, staleMs: 0, entries: [] };
   if (!p.running || !p.httpPort) return base;
   try {
-    const r = await fetch(`http://127.0.0.1:${p.httpPort}/registry`, { signal: AbortSignal.timeout(POLL_TIMEOUT_MS) });
+    const r = await nodeFetch(`http://127.0.0.1:${p.httpPort}/registry`, { signal: AbortSignal.timeout(POLL_TIMEOUT_MS) });
     const body = (await r.json()) as Omit<LighthouseView, "name" | "reachable">;
     return { ...base, ...body, name: p.name, reachable: true };
   } catch {
@@ -664,7 +668,7 @@ const server = createServer(async (req, res) => {
       if (typeof body.note === "string" && body.note.trim()) payload.note = body.note.trim();
       if (body.override === true) payload.override = true;
       const station = typeof body.station === "string" && body.station.trim() ? body.station.trim() : undefined;
-      const r = await fetch(`http://127.0.0.1:${target.httpPort}/send`, {
+      const r = await nodeFetch(`http://127.0.0.1:${target.httpPort}/send`, {
         method: "POST", headers: { "content-type": "application/json" },
         body: JSON.stringify({ kind, station, body: payload }), signal: AbortSignal.timeout(1_000),
       });
@@ -687,7 +691,7 @@ const server = createServer(async (req, res) => {
       const payload: Record<string, unknown> = { threat: body.threat };
       if (typeof body.note === "string" && body.note.trim()) payload.note = body.note.trim();
       if (body.pos && typeof body.pos === "object") payload.pos = body.pos;
-      const r = await fetch(`http://127.0.0.1:${target.httpPort}/send`, {
+      const r = await nodeFetch(`http://127.0.0.1:${target.httpPort}/send`, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ kind: "gcs.signal", station, body: payload }),
@@ -709,7 +713,7 @@ const server = createServer(async (req, res) => {
         .filter((p) => p.kind === "node" && p.running && p.httpPort && (!body.via || p.name === body.via));
       const target = candidates[Math.floor(Math.random() * candidates.length)];
       if (!target) return json(res, 503, { error: "no live node to ask" });
-      const r = await fetch(`http://127.0.0.1:${target.httpPort}/threat`, {
+      const r = await nodeFetch(`http://127.0.0.1:${target.httpPort}/threat`, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ threat }),
@@ -745,7 +749,7 @@ const server = createServer(async (req, res) => {
         .filter((p) => p.kind === "node" && p.running && p.httpPort && (!via || p.name === via));
       const target = candidates[Math.floor(Math.random() * candidates.length)];
       if (!target) return json(res, 503, { error: "no live node to ask" });
-      const r = await fetch(`http://127.0.0.1:${target.httpPort}/resolve/${resolveMatch[1]}`, {
+      const r = await nodeFetch(`http://127.0.0.1:${target.httpPort}/resolve/${resolveMatch[1]}`, {
         signal: AbortSignal.timeout(1_000), // a wedged node must not hang the dashboard
       });
       const body = await r.json();

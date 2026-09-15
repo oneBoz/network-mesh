@@ -151,6 +151,11 @@ export class Membership {
     );
   }
 
+  /** One member's current entry (status, incarnation, when it last changed). */
+  entry(id: string): MemberEntry | undefined {
+    return this.view.get(id);
+  }
+
   snapshot(): Record<string, MemberEntry & { info?: PeerInfo }> {
     const out: Record<string, MemberEntry & { info?: PeerInfo }> = {};
     for (const [id, e] of this.view) out[id] = { ...e, info: this.peers.get(id) };
