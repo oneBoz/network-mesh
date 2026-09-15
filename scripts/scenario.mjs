@@ -51,6 +51,7 @@ if (!state.procs.some((p) => p.kind === "node" && p.running)) {
 if (!Object.keys(state.geo.entries).length) {
   const t = await post("/api/geo/seed");
   console.log(`map was empty — seeded ${t.added} entries: ${Object.values(t.entries).map((e) => e.label ?? "device").join(", ")}`);
+  await sleep(1_500); // /api/state is the poller's last snapshot — give it one cycle to pick the seed up
   state = await api("/api/state");
 }
 
