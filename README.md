@@ -34,6 +34,7 @@ terminal:
 ```sh
 node scripts/smoke.mjs        # boots the fleet, waits for convergence, fires 4 threats
 node scripts/scenario.mjs     # seeds the map, runs "two swarms from the south-east", follows the lifecycle
+node scripts/preflight.mjs --expect azure-vm --drill   # judging-day GO / NO-GO: encryption, convergence, remotes, map, timed signal + kill/revive drill
 ```
 
 For the judging session itself, [`docs/DEMO.md`](docs/DEMO.md) is the
@@ -340,6 +341,7 @@ docs/ADDING-A-DEVICE.md     how to add a device
 .env.example                MESH_KEY, EXTRA_LIGHTHOUSES
 scripts/smoke.mjs           end-to-end check against a running dashboard
 scripts/scenario.mjs        run a scripted attack and follow the lifecycle from the terminal
+scripts/preflight.mjs       judging-day GO / NO-GO checklist with timings (--drill rehearses kill/revive)
 scripts/build-basemap.mjs   regenerate the bundled offline basemap from the data.gov.sg polygons
 backend-network-mesh/       mesh + control plane (see its README for the protocol and API)
 frontend-network-mesh/      dashboard UI

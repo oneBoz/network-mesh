@@ -17,7 +17,7 @@ a machine, [`../PLAN.md`](../PLAN.md) for the roadmap, the root
 
 | Device name | What | Where | Runs |
 |---|---|---|---|
-| `dingyi-mac` | Dingyi's Mac, home Wi-Fi, LAN `192.168.0.13`, public `116.88.197.32` | Singapore | Full dashboard via `docker compose up`, `EXTRA_LIGHTHOUSES=23.100.103.160:5001` |
+| `dingyi-mac` | Dingyi's Mac, home Wi-Fi, LAN `192.168.0.8` on 2026-09-15 (DHCP — it was `.13` the day before; check `ipconfig getifaddr en0`), public `116.88.197.32` | Singapore | Full dashboard via `docker compose up`, `EXTRA_LIGHTHOUSES=<mac02 LAN>:5001,23.100.103.160:5001` |
 | `mac02` | Second Mac on the **same router** as `dingyi-mac` | Singapore | Full dashboard on the G1 build; was **off** on 2026-09-15 morning (its nodes show dead). Rebuild on the current code before the demo |
 | `azure-vm` | Azure VM `mesh-vps`, Standard_B2pls_v2 (2 vCPU, 4 GB, arm64), Ubuntu 24.04, resource group `mesh-rg`, region Japan East | Tokyo | Full dashboard with host networking (`docker-compose.host.yml`), `ADVERTISE=23.100.103.160`; its lighthouse on UDP 5001 is the one every other device joins. On the G4 build as of 2026-09-15 |
 
@@ -325,6 +325,32 @@ stream + map → offline fallback and scenarios.
   it to every child; `node.ts` returns 401 on every query-API request without
   `Authorization: Bearer <token>` (except `/health`); `server.ts` sends it
   via `nodeFetch()`. Nodes started by hand without the variable stay open.
+
+### 2026-09-15 — Judging-day tooling and a network finding
+
+- `scripts/preflight.mjs [--expect dev1,dev2] [--drill]`: GO / WARN / NO-GO
+  table — dashboard, fleet, encryption, stable convergence, each expected
+  remote device (alive count, address, direct/relay), map layout, tile
+  reachability, a timed cross-device signal (3 attempts; a retry is WARN),
+  and with `--drill` the runbook's kill/revive step with timings. Wired into
+  DEMO.md step 2. First run: kill → first suspicion 2.3 s, dead on all peers
+  13.4 s (15-member mesh: suspect window scales with size), revive → alive
+  1.8 s.
+- `backend-network-mesh/scripts/find-lighthouses.ts <cidr|ip…>`: sends an
+  encrypted join to every host and lists lighthouses that answer — the way
+  to fill `EXTRA_LIGHTHOUSES` with a LAN address.
+- Finding: on this home Wi-Fi the two Macs cannot reach each other on the
+  LAN at all (no lighthouse answers, neighbours do not even answer ping —
+  client isolation), so they talk through the router's public address. That
+  hairpin path is lossy: ~70 suspect transitions per minute across the two
+  Macs, and a signal can land at 1/5 agreement. Tried `MESH_PROFILE=internet`
+  on dingyi-mac: no change (84 suspicions/min settled) — the hairpin drops
+  packets, wider timers cannot fix loss; reverted to `local`. The relay path
+  via the VM keeps mac02 5/5 alive. At the venue, a wired switch removes the
+  problem — run `find-lighthouses.ts` there and use LAN addresses. Preflight
+  on the settled mesh: GO, signal 5/5 in 1.0 s across all three devices.
+- Cold rehearsal from a fresh clone with `.env.example`: PASS (smoke,
+  scenario, seed, token gate).
 
 ## Verifying a build (checklist)
 
