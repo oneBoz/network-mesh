@@ -67,15 +67,6 @@ refuse to start without one (`REQUIRE_MESH_KEY`).
 
 ### Known open items
 
-- ~~Node query API unauthenticated~~ — fixed 2026-09-15 (bearer token). Was:
-  Node query API (`/members`, `/threat`, `/send`) is unauthenticated on
-- One shared key, no per-device identity: any key holder can claim any
-  device name; a leaked key exposes the whole mesh. Phase 6 (Noise/Ed25519).
-- Node query API (`/members`, `/threat`, `/send`) is unauthenticated on
-  `0.0.0.0`; only UDP is opened on the VM firewall, so it is not reachable
-  there, but Phase 1 of the plan (bearer token) is still to do.
-- Tests and CI (Phase 0) not started.
-====
 - `mac02` must be rebuilt on the current code and both Macs should list each
   other's **LAN** lighthouse (see the same-router note below). Until then it
   is either absent or a source of false suspicions on the Mac side.
@@ -85,15 +76,6 @@ refuse to start without one (`REQUIRE_MESH_KEY`).
   automatically yet.
 - Fixed 2026-09-15: escalation on transient convictions (dead-grace) and the
   unauthenticated node query API (bearer token) — see the hardening entry.
-====
-- ~~Node query API unauthenticated~~ — fixed 2026-09-15 (bearer token). Was:
-  Node query API (`/members`, `/threat`, `/send`) is unauthenticated on
-- One shared key, no per-device identity: any key holder can claim any
-  device name; a leaked key exposes the whole mesh. Phase 6 (Noise/Ed25519).
-- Node query API (`/members`, `/threat`, `/send`) is unauthenticated on
-  `0.0.0.0`; only UDP is opened on the VM firewall, so it is not reachable
-  there, but Phase 1 of the plan (bearer token) is still to do.
-- Tests and CI (Phase 0) not started.
 
 ---
 
