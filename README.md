@@ -33,7 +33,11 @@ terminal:
 
 ```sh
 node scripts/smoke.mjs        # boots the fleet, waits for convergence, fires 4 threats
+node scripts/scenario.mjs     # seeds the map, runs "two swarms from the south-east", follows the lifecycle
 ```
+
+For the judging session itself, [`docs/DEMO.md`](docs/DEMO.md) is the
+minute-by-minute runbook.
 
 The whole system is one container: the control plane on port 7070 spawns
 3 lighthouses and 5 defense-system nodes as child processes, exactly as the
@@ -58,6 +62,8 @@ Then try the threat ladder:
 | Revive `aegis` | it rejoins, logs `refuting rumor that I am dead — incarnation now 1`, and is primary again |
 | Kill all three lighthouses | nothing changes for the running mesh; only brand-new joins would wait |
 | Switch to **GCS**, report `swarm` | Latest engagement shows **MAELSTROM Command** with fallbacks; back in Command, the signal is in the feed with `5/5 agree` and the topology rings light up |
+| In Command press **seed Singapore demo layout**, then in GCS **run scenario** `saturation` | Three trajectories cross the map at 1 Hz, each with its own responsible system; press **NEUTRALISED** on the responsible device for a ✔, or let one land for ✖ **IMPACT** |
+| Press **🗺 offline map** | The island is drawn from the bundled basemap; markers and trajectories are unchanged and the page makes no network request |
 
 The smoke test prints the same story as text and exits 0 on success:
 
@@ -123,7 +129,31 @@ dashed line to the target, responsible device), smoothed between updates.
 If the responsible GCS neutralises it the stream stops and the head turns into
 ✔; if it reaches the target while still live it becomes ✖ **IMPACT** — the
 defence leaked. At most three simulated tracks per device; **cancel** sends
-`track.lost`. EMP has no trajectory and stays a point signal.
+`track.lost`. EMP has no trajectory and stays a point signal. While a track is
+live its detection is re-flooded every 15 s, so a device that boots or
+reconnects mid-track still gets the full picture.
+
+**Scripted scenarios.** The GCS launcher also has **run scenario**:
+`cruise-north`, `two-swarms-se`, `saturation` (missile, aircraft and swarm from
+three directions within 20 s) and `probe-aircraft` (slow enough for the engage
+timeout to escalate). A scenario is a list of launches relative to *one*
+target — delay, threat, bearing and range from the target, time to impact
+([`scenarios.ts`](backend-network-mesh/backend/src/scenarios.ts)) — so the
+same script attacks whichever asset you pick. From a terminal,
+`node scripts/scenario.mjs saturation` runs one and prints every lifecycle
+transition until the tracks end. Command mode's map has **seed Singapore demo
+layout**: six real defended assets (Changi and Paya Lebar airbases, Tuas Port,
+Jurong Island, Sembawang, Marina Bay) plus every device not yet on the map,
+so a fresh machine is demo-ready in one click.
+
+**Offline basemap.** The map uses OpenStreetMap tiles while it can reach them.
+The moment a tile fails to load, a bundled 58 KB GeoJSON of Singapore's 55
+planning areas (URA Master Plan 2014 via data.gov.sg, Singapore Open Data
+Licence; built by `scripts/build-basemap.mjs`) is drawn *beneath* the tiles,
+so a flaky link shows the island wherever a tile is missing. **🗺 offline map**
+in the map header switches to the bundled basemap only — the page then makes
+no network request at all — and the choice is remembered per browser. Markers
+and trajectories are identical either way.
 
 Under the hood each node exposes `POST /send {kind, body, to?, station?}` and
 `GET /inbox?after=<ms>`; the control plane wraps them as `POST /api/signal`
@@ -301,10 +331,13 @@ Dockerfile                  multi-stage build: dashboard + control plane in one 
 docker-compose.yml          the whole system, `docker compose up`
 docker-compose.remote.yml   optional lightweight remote site (lighthouse + node) for a public VPS
 docker-compose.host.yml     override: the full dashboard on a public VPS as a second device
+docs/DEMO.md                minute-by-minute runbook for the judging session
 docs/WORKLOG.md             work log + current state of every machine
 docs/ADDING-A-DEVICE.md     how to add a device
 .env.example                MESH_KEY, EXTRA_LIGHTHOUSES
 scripts/smoke.mjs           end-to-end check against a running dashboard
+scripts/scenario.mjs        run a scripted attack and follow the lifecycle from the terminal
+scripts/build-basemap.mjs   regenerate the bundled offline basemap from the data.gov.sg polygons
 backend-network-mesh/       mesh + control plane (see its README for the protocol and API)
 frontend-network-mesh/      dashboard UI
 PLAN.md                     roadmap

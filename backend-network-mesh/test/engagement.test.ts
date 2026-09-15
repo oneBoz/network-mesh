@@ -164,3 +164,28 @@ test("impact is terminal, only the origin may report it, and it records the fina
   applyMessage(st, msg("track.neutralised", GCS_VM, { trackId: "t1" }, 7000), ctx(7000));
   assert.equal(t.state, "impact", "too late");
 });
+
+test("late joiner: replaying the whole log in one burst reaches the same lifecycle as a node that saw it live", () => {
+  // This is what lets G2 skip track.snapshot: a node that boots mid-engagement
+  // and receives the (re-flooded) log converges on the same state and positions.
+  const log: MeshMessage[] = [
+    msg("track.detected", GCS_MAC, { threat: "missile", target: "asset-changi", pos: { lat: 1.2, lng: 103.8 } }, 1000, "t1"),
+    msg("track.update", GCS_MAC, { trackId: "t1", seq: 1, lat: 1.21, lng: 103.81 }, 2000),
+    msg("track.engaging", GCS_VM, { trackId: "t1" }, 2500),
+    msg("track.update", GCS_MAC, { trackId: "t1", seq: 2, lat: 1.22, lng: 103.82 }, 3000),
+    msg("track.handover", GCS_VM, { trackId: "t1", note: "hand to mac" }, 3500),
+    msg("track.update", GCS_MAC, { trackId: "t1", seq: 3, lat: 1.23, lng: 103.83 }, 4000),
+    msg("track.neutralised", GCS_MAC, { trackId: "t1" }, 4500),
+  ];
+  const summary = (st: ReturnType<typeof createEngagement>) => {
+    const t = st.tracks.get("t1")!;
+    return JSON.stringify({ s: t.state, r: responsibleNode(t), e: t.escalations.map((e) => [e.reason, e.from, e.to]), by: t.neutralised?.device, pos: t.positions.map((p) => p.seq), rej: t.rejected.length });
+  };
+  const live = createEngagement();
+  for (const m of log) { applyMessage(live, m, ctx(m.at + 20), CHAIN); tick(live, ctx(m.at + 40)); }
+  const late = createEngagement();
+  for (const m of log) applyMessage(late, m, ctx(60_000), CHAIN); // everything at once, a minute later
+  tick(late, ctx(60_000));
+  assert.equal(summary(late), summary(live));
+  assert.match(summary(live), /"s":"neutralised".*"pos":\[0,1,2,3\]/);
+});

@@ -1,4 +1,4 @@
-import type { GeoEntry, GeoTable, InboxMessage, LogEvent, MeshState, SimTrackInfo, ThreatAssignmentEvent, ThreatType } from "./types";
+import type { GeoEntry, GeoTable, InboxMessage, LogEvent, MeshState, ScenarioInfo, ScenarioRun, SimTrackInfo, ThreatAssignmentEvent, ThreatType } from "./types";
 
 async function post(path: string, body?: unknown): Promise<unknown> {
   const r = await fetch(path, {
@@ -41,6 +41,16 @@ export const api = {
     if (!r.ok) throw new Error(data.error ?? `${r.status} ${r.statusText}`);
     return data;
   },
+  /** Fill the location table with the demo Singapore layout (assets + unplaced devices). */
+  seedGeo: () => post("/api/geo/seed") as Promise<GeoTable & { added: number }>,
+  /** Scripted scenarios: several simulated launches against one target, driven by this device. */
+  listScenarios: async (): Promise<ScenarioInfo[]> => {
+    const r = await fetch("/api/sim/scenarios");
+    if (!r.ok) throw new Error(`${r.status} ${r.statusText}`);
+    return ((await r.json()) as { scenarios: ScenarioInfo[] }).scenarios;
+  },
+  runScenario: (id: string, opts: { target?: string; station?: string } = {}) =>
+    post(`/api/sim/scenarios/${encodeURIComponent(id)}`, opts) as Promise<ScenarioRun>,
   /** Launch / cancel a simulated incoming target driven by this device's control plane. */
   startSim: (spec: { threat: ThreatType; origin: { lat: number; lng: number }; target: string; etaMs: number; station?: string; note?: string }) =>
     post("/api/sim/tracks", spec) as Promise<SimTrackInfo>,

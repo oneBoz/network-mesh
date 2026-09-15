@@ -37,6 +37,12 @@ export class GeoStore {
     return this.commit({ version: this.table.version + 1, updatedBy: this.device, updatedAt: Date.now(), entries });
   }
 
+  /** Several entries in one version bump (the demo seed). Unchanged table if there is nothing to add. */
+  setMany(entries: Record<string, GeoEntry>): GeoTable {
+    if (!Object.keys(entries).length) return this.table;
+    return this.commit({ version: this.table.version + 1, updatedBy: this.device, updatedAt: Date.now(), entries: { ...this.table.entries, ...entries } });
+  }
+
   remove(id: string): GeoTable {
     if (!(id in this.table.entries)) return this.table;
     const { [id]: _gone, ...entries } = this.table.entries;

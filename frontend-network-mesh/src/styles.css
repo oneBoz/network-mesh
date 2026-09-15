@@ -377,3 +377,9 @@ button.neutralise:hover { background: var(--alive); color: #06101f; }
 
 .map-fit { margin-left: auto; padding: 2px 8px; font-size: 11px; text-transform: none; letter-spacing: 0; }
 .map-panel h2 { display: flex; align-items: center; }
+
+/* ---------- offline basemap (MapPanel, src/basemap/singapore.geo.json) ---------- */
+.map.drawn { background: #0b1526; } /* the sea */
+.pa-label { display: none; background: transparent; border: 0; box-shadow: none; color: #7188b0; font-size: 9.5px; letter-spacing: .05em; text-transform: uppercase; text-shadow: 0 0 3px #000, 0 0 3px #000; pointer-events: none; }
+.pa-label:before { display: none; }
+.map.drawn:not(.zoom-lo) .pa-label { display: block; } /* planning-area names only when the island is drawn and zoomed in */

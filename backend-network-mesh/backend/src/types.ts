@@ -193,6 +193,12 @@ export interface SimTrackInfo {
   seq: number;
 }
 
+/** A scripted demo scenario: launches relative to one target (backend/src/scenarios.ts).
+ *  Each step: when (delay after start), what, from where (bearing + range from the target), time to impact. */
+export interface ScenarioStep { delayMs: number; threat: ThreatType; bearing: number; rangeKm: number; etaMs: number; note?: string }
+export interface ScenarioInfo { id: string; name: string; description: string; steps: ScenarioStep[] }
+export interface ScenarioRun { runId: string; scenario: string; target: string; launches: number; startedAt: number }
+
 /** A track merged across the local nodes: first report, plus how many agree on state + responsible. */
 export interface TrackView extends Track {
   seenBy: string[];

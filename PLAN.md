@@ -338,10 +338,11 @@ with a bundled offline fallback**.
   ownership; the gossiped alternative was rejected for simplicity.
 - Basemap: Leaflet (bundled via npm, not a CDN) with OpenStreetMap tiles when
   reachable (attribution shown), falling back to a bundled GeoJSON of
-  Singapore's coastline and planning areas (~200 KB, from data.gov.sg,
+  Singapore's 55 planning areas (58 KB after simplification, from data.gov.sg,
   Singapore Open Data Licence) rendered by Leaflet itself, so the same markers
-  and polylines work in both modes. Fallback triggers when the first tile
-  fails to load.
+  and polylines work in both modes. Built: the GeoJSON sits in a pane *under*
+  the tiles and is added the moment a tile fails, so missing tiles reveal the
+  drawn island; a header switch forces offline (no network requests at all).
 
 ### 5.2 Trajectory stream
 
@@ -418,9 +419,9 @@ and the handover message from the GCS resolves it explicitly.
 | Phase | Scope | Estimate |
 |---|---|---|
 | G1 ✅ 2026-09-14 | Location table, persistence volume, broadcast + request, map component with tiles and device markers, place mode | 1.5 days |
-| G2 ✅ 2026-09-15 | Track simulator, `track.*` messages, coalescing, trajectory rendering on Command and GCS (snapshots deferred: the reducer replays out-of-order and positions accumulate, so late joiners converge without them) | 2 days |
+| G2 ✅ 2026-09-15 | Track simulator, `track.*` messages, coalescing, trajectory rendering on Command and GCS. Instead of `track.snapshot`, the simulator re-floods the original `track.detected` (same id) every 15 s while the track is live; nodes holding the track drop it, a node that joined mid-track creates it and replays its queued updates (added in G4 after a test showed a device booting mid-track never learned of it) | 2 days |
 | G3 ✅ 2026-09-15 | Lifecycle reducer (shared TypeScript module used by node and control plane), escalation rules, authorised neutralise, timeline, agreement counter | 1.5 days |
-| G4 | Offline basemap fallback, scripted scenarios, `node:test` suite for the reducer (same message log ⇒ same states on every node), docs, judge demo script | 1 day |
+| G4 ✅ 2026-09-15 | Offline basemap fallback (58 KB bundled planning areas drawn beneath the tiles, plus a manual offline switch), scripted scenarios + demo layout seed, `node:test` suite (reducer determinism and late-joiner replay, scenario geometry, seed), `scripts/scenario.mjs`, docs, judge demo script (`docs/DEMO.md`) | 1 day |
 
 Order: G1 → G3's reducer (it can be tested without a map) → G2 → G4. The
 reducer first, because it is the part that must be right.

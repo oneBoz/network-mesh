@@ -15,6 +15,11 @@ const STATUS_COLOR: Record<NodeStatus | "unknown" | "asset", string> = {
 const THREAT_COLOR: Record<string, string> = { missile: "#ff6b6b", swarm: "#f5b841", aircraft: "#5eead4", emp: "#c4b5fd" };
 const THREAT_GLYPH: Record<string, string> = { missile: "▲", swarm: "✱", aircraft: "✈", emp: "⚡" };
 const RECENT_MS = 90_000; // finished tracks stay on the map this long
+const BASEMAP_KEY = "mesh-map-basemap";
+/** "auto": OpenStreetMap tiles, with the bundled island drawn beneath them as soon as a tile
+ *  fails to load. "offline": the bundled basemap only — the page makes no network request. */
+type Basemap = "auto" | "offline";
+const LABEL_ZOOM = 12; // planning-area names appear from this zoom in
 
 interface Placeable {
   id: string;
@@ -75,7 +80,14 @@ export function MapPanel({ state, editable, height = 340, onError, pickOrigin, o
   pickRef.current = { on: !!pickOrigin, cb: onPickOrigin };
   const [selected, setSelected] = useState<string | null>(null);
   const [newAsset, setNewAsset] = useState("");
-  const [offline, setOffline] = useState(false);
+  const [offline, setOffline] = useState(false); // a tile failed to load
+  const [basemap, setBasemap] = useState<Basemap>(() => {
+    try { return localStorage.getItem(BASEMAP_KEY) === "offline" ? "offline" : "auto"; } catch { return "auto"; }
+  });
+  const [zoomLo, setZoomLo] = useState(true);
+  const tiles = useRef<L.TileLayer | null>(null);
+  const fallback = useRef<L.GeoJSON | null>(null);
+  const drawn = basemap === "offline" || offline; // the bundled basemap is (or is about to be) on screen
   const items = placeables(state);
   const selectedRef = useRef<{ id: string; kind: GeoEntry["kind"]; label?: string } | null>(null);
 
@@ -83,10 +95,17 @@ export function MapPanel({ state, editable, height = 340, onError, pickOrigin, o
   useEffect(() => {
     if (!el.current || map.current) return;
     const m = L.map(el.current, { center: SINGAPORE, zoom: 11, zoomControl: true, attributionControl: true });
-    const tiles = L.tileLayer(TILES, { attribution: ATTRIB, maxZoom: 18 });
-    tiles.on("tileerror", () => setOffline(true));
-    tiles.on("tileload", () => setOffline(false));
-    tiles.addTo(m);
+    // Tiles live in Leaflet's tilePane (z-index 200). The bundled basemap goes
+    // in a pane beneath them, so a tile that fails to load (transparent)
+    // reveals the drawn island while a tile that loads covers it — patchy
+    // connectivity needs no special handling. The basemap effect below adds it.
+    m.createPane("basemap").style.zIndex = "150";
+    const t = L.tileLayer(TILES, { attribution: ATTRIB, maxZoom: 18 });
+    t.on("tileerror", () => setOffline(true));
+    t.on("tileload", () => setOffline(false));
+    tiles.current = t;
+    m.on("zoomend", () => setZoomLo(m.getZoom() < LABEL_ZOOM));
+    setZoomLo(m.getZoom() < LABEL_ZOOM);
     layer.current = L.layerGroup().addTo(m);
     trackLayer.current = L.layerGroup().addTo(m);
     m.on("click", (e: L.LeafletMouseEvent) => {
@@ -102,6 +121,28 @@ export function MapPanel({ state, editable, height = 340, onError, pickOrigin, o
     map.current = m;
     return () => { m.remove(); map.current = null; };
   }, []);
+
+  // Basemap mode. The bundled GeoJSON (~60 KB, src/basemap/) is a separate
+  // chunk fetched from our own origin on first need, so it works with no internet.
+  useEffect(() => {
+    try { localStorage.setItem(BASEMAP_KEY, basemap); } catch { /* ignore */ }
+    const m = map.current, t = tiles.current;
+    if (!m || !t) return;
+    if (basemap === "offline") { if (m.hasLayer(t)) m.removeLayer(t); }
+    else if (!m.hasLayer(t)) t.addTo(m);
+    if (!drawn || fallback.current) return;
+    let cancelled = false;
+    void import("./basemap/singapore.geo.json").then(({ default: data }) => {
+      if (cancelled || fallback.current || !map.current) return;
+      fallback.current = L.geoJSON(data, {
+        pane: "basemap",
+        attribution: data.attribution,
+        style: { color: "#2b4d73", weight: 1, fillColor: "#182741", fillOpacity: 1 },
+        onEachFeature: (f, lyr) => lyr.bindTooltip(String(f.properties?.name ?? ""), { permanent: true, direction: "center", className: "pa-label" }),
+      }).addTo(map.current);
+    }).catch((err: Error) => onError?.(`offline basemap failed to load: ${err.message}`));
+    return () => { cancelled = true; };
+  }, [basemap, drawn]);
 
   // Redraw markers whenever the table or statuses change.
   useEffect(() => {
@@ -196,12 +237,24 @@ export function MapPanel({ state, editable, height = 340, onError, pickOrigin, o
             table v{state.geo.version} by {state.geo.updatedBy}
           </span>
         )}
-        {offline && <span className="remote-tag" style={{ marginLeft: 8, color: "var(--suspect)", background: "rgba(245,184,65,.15)" }}>tiles offline</span>}
+        {basemap === "offline" ? (
+          <span className="remote-tag" style={{ marginLeft: 8 }}>bundled basemap · no network</span>
+        ) : offline && (
+          <span className="remote-tag" style={{ marginLeft: 8, color: "var(--suspect)", background: "rgba(245,184,65,.15)" }}>tiles unreachable → bundled basemap</span>
+        )}
         {pickOrigin && <span className="remote-tag" style={{ marginLeft: 8, color: "var(--suspect)", background: "rgba(245,184,65,.15)" }}>click the map: launch origin</span>}
-        <button className="map-fit" title="fit the map to every device, asset and trajectory" onClick={fitAll}>⤢ fit</button>
+        <button className="map-fit" style={{ marginLeft: "auto" }}
+          title={basemap === "auto" ? "stop loading OpenStreetMap tiles and draw the bundled Singapore basemap — works with no internet" : "load OpenStreetMap tiles again when reachable"}
+          onClick={() => setBasemap((b) => (b === "auto" ? "offline" : "auto"))}>
+          {basemap === "auto" ? "🗺 offline map" : "🌐 online tiles"}
+        </button>
+        <button className="map-fit" style={{ marginLeft: 6 }} title="fit the map to every device, asset and trajectory" onClick={fitAll}>⤢ fit</button>
       </h2>
       <div className="map-row">
-        <div ref={el} className={`map${pickOrigin ? " picking" : ""}`} style={{ height }} />
+        {/* Leaflet owns the inner div's classes; React owns the wrapper's, so toggling ours never wipes Leaflet's. */}
+        <div className={`map${pickOrigin ? " picking" : ""}${drawn ? " drawn" : ""}${zoomLo ? " zoom-lo" : ""}`} style={{ height }}>
+          <div ref={el} style={{ height: "100%" }} />
+        </div>
         {editable && (
           <div className="map-side">
             <div className="muted" style={{ fontSize: 11, marginBottom: 6 }}>
@@ -230,6 +283,10 @@ export function MapPanel({ state, editable, height = 340, onError, pickOrigin, o
                 onChange={(e) => setNewAsset(e.target.value)} onKeyDown={(e) => e.key === "Enter" && startNewAsset()} />
               <button onClick={startNewAsset} disabled={!newAsset.trim()}>+ place</button>
             </div>
+            <button style={{ marginTop: 8 }} title="place the demo assets (Changi and Paya Lebar airbases, Tuas Port, Jurong Island, Sembawang, Marina Bay) and every device not on the map yet — one click to a demo-ready map"
+              onClick={() => api.seedGeo().catch((err: Error) => onError?.(err.message))}>
+              ⊕ seed Singapore demo layout
+            </button>
             {unplaced.length > 0 && (
               <div className="muted" style={{ fontSize: 11, marginTop: 8 }}>
                 {unplaced.length} device{unplaced.length === 1 ? "" : "s"} not on the map yet

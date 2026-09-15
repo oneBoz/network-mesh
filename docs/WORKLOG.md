@@ -11,15 +11,17 @@ a machine, [`../PLAN.md`](../PLAN.md) for the roadmap, the root
 
 ---
 
-## Current state (2026-09-14, evening)
+## Current state (2026-09-15, morning)
 
 ### Machines in the mesh
 
 | Device name | What | Where | Runs |
 |---|---|---|---|
 | `dingyi-mac` | Dingyi's Mac, home Wi-Fi, LAN `192.168.0.13`, public `116.88.197.32` | Singapore | Full dashboard via `docker compose up`, `EXTRA_LIGHTHOUSES=23.100.103.160:5001` |
-| `mac02` | Second Mac on the **same router** as `dingyi-mac` | Singapore | Full dashboard (was on an older build at time of writing — rebuild it) |
-| `azure-vm` | Azure VM `mesh-vps`, Standard_B2pls_v2 (2 vCPU, 4 GB, arm64), Ubuntu 24.04, resource group `mesh-rg`, region Japan East | Tokyo | Full dashboard with host networking (`docker-compose.host.yml`), `ADVERTISE=23.100.103.160`; its lighthouse on UDP 5001 is the one every other device joins |
+| `mac02` | Second Mac on the **same router** as `dingyi-mac` | Singapore | Full dashboard on the G1 build; was **off** on 2026-09-15 morning (its nodes show dead). Rebuild on the current code before the demo |
+| `azure-vm` | Azure VM `mesh-vps`, Standard_B2pls_v2 (2 vCPU, 4 GB, arm64), Ubuntu 24.04, resource group `mesh-rg`, region Japan East | Tokyo | Full dashboard with host networking (`docker-compose.host.yml`), `ADVERTISE=23.100.103.160`; its lighthouse on UDP 5001 is the one every other device joins. On the G4 build as of 2026-09-15 |
+
+Judging-day procedure: [DEMO.md](DEMO.md).
 
 Azure VM access: static public IP **23.100.103.160**, user `azureuser`, SSH key
 is the RSA key of the Mac that created it (`~/.ssh/id_rsa`). From another
@@ -67,6 +69,15 @@ refuse to start without one (`REQUIRE_MESH_KEY`).
 - `mac02` must be rebuilt on the current code and both Macs should list each
   other's **LAN** lighthouse (see the same-router note below). Until then the
   Mac side logs many false suspicions that originate on `mac02`.
+- **Escalation on transient convictions.** While a remote fleet is booting
+  (or churning), a local node can briefly convict a *local* peer dead; the
+  reducer escalates on the first `dead` it sees and never moves back, so nodes
+  that saw different flaps end up with different responsible nodes (seen
+  2026-09-15: two swarm tracks at 1/5 agree after the VM fleet was booted
+  seconds before the launch). Steady state is unaffected — boot every device
+  well before launching (DEMO.md does). Fix candidates: require `dead` to
+  persist for one suspect window before escalating, or re-derive the
+  responsible index from the chain and current membership each tick.
 - No encryption yet (HMAC-signed plaintext). Roadmap Phase 6.
 - Node query API (`/members`, `/threat`, `/send`) is unauthenticated on
   `0.0.0.0`; only UDP is opened on the VM firewall, so it is not reachable
@@ -251,12 +262,45 @@ stream + map → offline fallback and scenarios.
   motion), origin picking mode. GCS: scenario launcher + running sims list
   with cancel. Impact in badges and timeline; topology ring cleared on impact.
 
+### 2026-09-15 — G4 built: offline basemap, scenarios, demo runbook
+
+- Offline basemap: `scripts/build-basemap.mjs` simplifies the data.gov.sg
+  planning-area polygons (Douglas-Peucker 0.0003°, 41k → 3k vertices) into
+  `frontend-network-mesh/src/basemap/singapore.geo.json` (58 KB, committed,
+  Singapore Open Data Licence). `MapPanel` loads it as a lazy chunk into a
+  pane *under* the tiles when a tile fails (or on the 🗺 offline switch,
+  remembered in localStorage), so patchy tiles reveal the drawn island and
+  fully offline shows the whole map with the same markers/trajectories.
+  The map wrapper div is now React-owned and Leaflet gets an inner div —
+  toggling `picking` used to overwrite Leaflet's own classes.
+- Scenarios: `backend/src/scenarios.ts` — four scripted attacks (launches
+  relative to one target: delay, threat, bearing, range, ETA) run by a
+  `ScenarioRunner` on the existing simulator; `GET /api/sim/scenarios`,
+  `POST /api/sim/scenarios/<id>`; stop-all drops pending launches. Demo layout
+  seed: six real assets + slots for unplaced devices, `POST /api/geo/seed`
+  (one version bump via `GeoStore.setMany`), button in the Command map panel.
+  GCS launcher gained a scenario select + run button.
+- Tests: 15 (`npm test`) — added late-joiner replay equivalence for the
+  reducer, `destination()` inverse check, scenario shape constraints, seed
+  idempotence. `scripts/scenario.mjs` runs a scenario against a live
+  dashboard and follows every transition until the tracks end.
+- Late joiners: a device whose fleet booted *after* a launch received every
+  `track.update` but never the `track.detected`, so it showed no track. The
+  simulator now re-floods the original detection (same id) every 15 s while
+  live (`POST /send {resend: <id>}` on any node holding it); nodes with the
+  track drop it (`ingestMessage` checks `engagement.tracks`), late joiners
+  create it and replay their queued updates. Stands in for `track.snapshot`.
+- Docs: `docs/DEMO.md` (judge runbook), README sections, backend API list.
+- `scripts/smoke.mjs` now requires identical alive sets for 3 consecutive
+  polls before firing: right after a boot, views of remote peers still flap.
+
 ## Verifying a build (checklist)
 
 ```sh
-cd backend-network-mesh && npm run typecheck
+cd backend-network-mesh && npm run typecheck && npm test
 cd ../frontend-network-mesh && npm run typecheck && npm run build
 cd .. && docker compose up -d --build && node scripts/smoke.mjs     # PASS
+node scripts/scenario.mjs cruise-north                              # PASS (ends in IMPACT unless neutralised)
 ```
 
 With a remote device up, additionally check in the dashboard that its card is

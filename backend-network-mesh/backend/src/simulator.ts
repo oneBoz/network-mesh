@@ -10,11 +10,18 @@
  * (seen in the merged lifecycle) updates stop; when it reaches the target
  * while still live, it reports `track.impact`; cancelling sends `track.lost`.
  * At most MAX_LIVE tracks per device.
+ *
+ * Late joiners: every REANNOUNCE_MS the original `track.detected` message is
+ * re-flooded with its own id. Nodes that already hold the track drop it; a
+ * node that booted (or a device that reconnected) mid-track gets it and
+ * replays the position updates it had queued. This stands in for the
+ * `track.snapshot` message PLAN.md §5.2 describes.
  */
 import type { SimTrackInfo, ThreatType, TrackView } from "./types.js";
 
 export const MAX_LIVE = 3;
 const TICK_MS = 1_000;
+export const REANNOUNCE_MS = 15_000; // re-flood the detection this often while the track is live
 const ARRIVE_M = 150; // within this of the target counts as impact
 
 export interface SimSpec {
@@ -32,6 +39,7 @@ interface SimTrack extends SimTrackInfo {
 }
 
 type Send = (kind: string, body: Record<string, unknown>, station?: string) => Promise<{ id?: string } | null>;
+type Resend = (id: string) => Promise<boolean>;
 
 const R = 6_371_000;
 const toRad = (d: number) => (d * Math.PI) / 180;
@@ -69,7 +77,12 @@ function lateral(threat: ThreatType, elapsedS: number, f: number): number {
 export class Simulator {
   private live = new Map<string, SimTrack>();
 
-  constructor(private readonly send: Send, private readonly tracks: () => TrackView[], private readonly log: (line: string) => void) {}
+  constructor(
+    private readonly send: Send,
+    private readonly tracks: () => TrackView[],
+    private readonly log: (line: string) => void,
+    private readonly resend: Resend = async () => false,
+  ) {}
 
   list(): SimTrackInfo[] {
     return [...this.live.values()].map(({ spec: _s, timer: _t, ...info }) => info);
@@ -130,6 +143,7 @@ export class Simulator {
       this.log(`simulated ${spec.threat} ${trackId} reached ${spec.target.id} — IMPACT`);
       return;
     }
+    if (sim.seq % (REANNOUNCE_MS / TICK_MS) === 0) void this.resend(trackId); // for nodes that joined after the launch
     const dist = distanceM(spec.origin, spec.target);
     await this.send("track.update", {
       trackId, seq: sim.seq, t: Date.now(), lat: pos.lat, lng: pos.lng,

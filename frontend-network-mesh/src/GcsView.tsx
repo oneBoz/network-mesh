@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { api } from "./api";
-import type { InboxMessage, MeshState, ThreatAssignmentEvent, ThreatType } from "./types";
+import type { InboxMessage, MeshState, ScenarioInfo, ThreatAssignmentEvent, ThreatType } from "./types";
 import { deviceOf, systemLabel, systemName, systemOf } from "./defense";
 import { SignalRow, fmtTime } from "./SignalsPanel";
 import { groupRemotes } from "./remotes";
@@ -54,6 +54,21 @@ export function GcsView({
     setPicking(false);
     try {
       await api.startSim({ threat: simThreat, origin, target: simTarget, etaMs: simEta, station: stationName });
+    } catch (e) { onError((e as Error).message); }
+  };
+  // Scripted scenarios (several launches against one target), listed by the control plane.
+  const [scenarios, setScenarios] = useState<ScenarioInfo[]>([]);
+  const [scenarioId, setScenarioId] = useState("");
+  const [scenarioMsg, setScenarioMsg] = useState<string | null>(null);
+  useEffect(() => {
+    api.listScenarios().then((s) => { setScenarios(s); setScenarioId((id) => id || s[0]?.id || ""); }).catch(() => { /* older control plane */ });
+  }, []);
+  const scenario = scenarios.find((s) => s.id === scenarioId);
+  const runScenario = async () => {
+    setScenarioMsg(null);
+    try {
+      const r = await api.runScenario(scenarioId, { target: simTarget || undefined, station: stationName });
+      setScenarioMsg(`${scenario?.name ?? r.scenario} → ${state.geo.entries[r.target]?.label ?? r.target}: ${r.launches} launch${r.launches === 1 ? "" : "es"} scheduled`);
     } catch (e) { onError((e as Error).message); }
   };
   const [myIds, setMyIds] = useState<Set<string>>(() => new Set());
@@ -161,7 +176,19 @@ export function GcsView({
               {picking ? "click the map for the origin… (cancel)" : "▶ pick origin on map"}
             </button>
           </div>
-          {!targets.length && <div className="muted" style={{ fontSize: 12, marginTop: 6 }}>No targets on the map yet — place devices or defended assets in Command mode.</div>}
+          <div className="row" style={{ gap: 8, marginTop: 8 }}>
+            <span className="muted">or a scripted scenario:</span>
+            <select value={scenarioId} onChange={(e) => setScenarioId(e.target.value)} disabled={!scenarios.length}>
+              {scenarios.map((s) => <option key={s.id} value={s.id}>{s.name} · {s.steps.length} launch{s.steps.length === 1 ? "" : "es"}</option>)}
+            </select>
+            <button disabled={!scenarioId || !targets.length || !liveNodes.length} onClick={runScenario}
+              title={simTarget ? `runs against ${state.geo.entries[simTarget]?.label ?? simTarget}` : "runs against the first defended asset on the map (pick a target above to choose)"}>
+              ▶ run scenario
+            </button>
+          </div>
+          {scenario && <div className="muted" style={{ fontSize: 12, marginTop: 4 }}>{scenario.description}</div>}
+          {scenarioMsg && <div style={{ fontSize: 12, marginTop: 4, color: "var(--suspect)" }}>{scenarioMsg}</div>}
+          {!targets.length && <div className="muted" style={{ fontSize: 12, marginTop: 6 }}>No targets on the map yet — in Command mode place devices or defended assets, or press <b>seed Singapore demo layout</b>.</div>}
           {state.sims.length > 0 && (
             <div className="proc-list" style={{ marginTop: 8 }}>
               {state.sims.map((s) => {

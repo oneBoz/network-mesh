@@ -82,9 +82,13 @@ http://127.0.0.1:7070 — by default from a sibling checkout at
     GET    /api/geo                    location table (devices + defended assets)
     PUT    /api/geo/<id>               {kind, lat, lng, label?} → place or move; persisted, broadcast
     DELETE /api/geo/<id>               remove; broadcast
+    POST   /api/geo/seed               place the demo Singapore layout (6 assets + unplaced devices); broadcast
     POST   /api/sim/tracks             {threat, origin:{lat,lng}, target:<geo id>, etaMs?, station?, note?}
+                                       (the detection is re-flooded every 15 s while live, for late joiners)
                                        → launch a simulated incoming target driven by this control plane
     DELETE /api/sim/tracks/<id>        cancel it (sends track.lost)
+    GET    /api/sim/scenarios          scripted scenarios (launches relative to one target)
+    POST   /api/sim/scenarios/<id>     {target?, station?} → run one; target defaults to the first defended asset
     POST   /api/tracks/<id>/<action>   neutralise | handover | engaging, body {station?, note?, override?}
                                        → lifecycle message from this device (see engagement.ts)
     POST   /api/signal                 {threat, station?, note?, via?} → GCS signal:

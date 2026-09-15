@@ -37,6 +37,7 @@ for (let i = 0; i < 15; i++) {
 
 const t0 = Date.now();
 let converged = false;
+let stable = 0; // consecutive polls with identical alive sets — right after a boot, views of REMOTE peers still flap for a few seconds
 while (Date.now() - t0 < CONVERGE_TIMEOUT_MS) {
   const state = await api("/api/state");
   const views = state.views.filter((v) => NODES.includes(v.id));
@@ -49,12 +50,12 @@ while (Date.now() - t0 < CONVERGE_TIMEOUT_MS) {
     && new Set(views.map(aliveSet)).size === 1;
   const alive = views.map((v) => `${v.id}:${Object.values(v.view).filter((x) => x.status === "alive").length}`).join(" ");
   process.stdout.write(`\r  ${((Date.now() - t0) / 1000).toFixed(0)}s  alive peers per node → ${alive}      `);
-  if (ok) { converged = true; break; }
+  if (ok) { if (++stable >= 3) { converged = true; break; } } else stable = 0;
   await sleep(1_000);
 }
 console.log();
 if (!converged) fail(`mesh did not converge within ${CONVERGE_TIMEOUT_MS / 1000}s`);
-console.log(`converged: every node sees the other ${NODES.length - 1} alive (${((Date.now() - t0) / 1000).toFixed(1)}s)`);
+console.log(`converged: every node sees the other ${NODES.length - 1} alive, identical alive sets for 3 s (${((Date.now() - t0) / 1000).toFixed(1)}s)`);
 
 for (const threat of THREATS) {
   const a = await api("/api/threat", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ threat }) });
@@ -64,18 +65,27 @@ for (const threat of THREATS) {
 
 // Data channel: a GCS signal is flooded to every node; each one matchmakes it
 // and the dashboard merges their inboxes — all five must report the same answer.
-const sig = await api("/api/signal", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ threat: "missile", station: "smoke-gcs", note: "smoke test" }) });
-if (!sig.assignment?.primary) fail("gcs signal had no assignment");
-console.log(`signal  missile  via ${sig.via.padEnd(11)} → primary ${sig.assignment.primary} (station smoke-gcs)`);
-let merged = null;
-for (let i = 0; i < 10; i++) {
-  await sleep(1_000);
-  const st = await api("/api/state");
-  merged = st.messages.find((m) => m.id === sig.id);
-  if (merged && merged.seenBy.length >= NODES.length) break;
+let sig, merged = null;
+for (let attempt = 1; attempt <= 3; attempt++) {
+  sig = await api("/api/signal", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ threat: "missile", station: "smoke-gcs", note: "smoke test" }) });
+  if (!sig.assignment?.primary) fail("gcs signal had no assignment");
+  console.log(`signal  missile  via ${sig.via.padEnd(11)} → primary ${sig.assignment.primary} (station smoke-gcs)`);
+  merged = null;
+  for (let i = 0; i < 10; i++) {
+    await sleep(1_000);
+    const st = await api("/api/state");
+    merged = st.messages.find((m) => m.id === sig.id);
+    if (merged && merged.seenBy.length >= NODES.length) break;
+  }
+  if (!merged) fail("signal never showed up in /api/state messages");
+  if (merged.consistent) break;
+  // A peer on another device joined or flapped in the instant between ingest on two local
+  // nodes, so their views (and thus the fallback lists) differed. That is what the agreement
+  // counter is for; the property under test is that a settled mesh agrees, so try again.
+  console.log(`  ${merged.agree}/${merged.seenBy.length} agree — membership changed during the check (remote peer joining/flapping), retrying ${attempt}/3`);
+  if (attempt === 3) fail(`nodes still disagree on the signal after 3 attempts: ${JSON.stringify(merged)}`);
+  await sleep(3_000);
 }
-if (!merged) fail("signal never showed up in /api/state messages");
-if (!merged.consistent) fail(`nodes disagree on the signal: ${JSON.stringify(merged)}`);
 console.log(`signal received by ${merged.seenBy.length}/${NODES.length} local nodes, all computed the same actions`);
 
 // Engagement lifecycle: the signal is a track; every node must agree on state + responsible.

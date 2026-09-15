@@ -318,6 +318,8 @@ function validMessage(m: unknown): m is MeshMessage {
 function ingestMessage(m: unknown, ttl: number, hop?: string): StoredMessage | null {
   if (!validMessage(m)) return null;
   if (seenMsgs.has(m.id)) return null;
+  // A re-flooded detection (the simulator re-announces for late joiners) arriving after the dedupe window.
+  if (isDetection(m.kind) && engagement.tracks.has(m.id)) return null;
   seenMsgs.set(m.id, Date.now());
 
   const mine = !m.to || m.to === ID;
@@ -347,19 +349,22 @@ function ingestMessage(m: unknown, ttl: number, hop?: string): StoredMessage | n
     if (inbox.length > MAX_INBOX) inbox.splice(0, inbox.length - MAX_INBOX);
   }
 
-  if (ttl > 0) {
-    const alive = membership.alivePeers().filter((p) => p.id !== hop);
-    const local = alive.filter((p) => p.device === DEVICE);
-    const away = alive.filter((p) => p.device !== DEVICE);
-    const relays = sample(away.filter((p) => !!p.advertise), MSG_RELAYS);
-    const others = sample(away.filter((p) => !p.advertise), MSG_FANOUT);
-    // A unicast we can address directly always goes straight to its target too.
-    const direct = m.to ? alive.find((p) => p.id === m.to) : undefined;
-    const targets = new Map<string, PeerInfo>();
-    for (const p of [...local, ...relays, ...others, ...(direct ? [direct] : [])]) targets.set(p.id, p);
-    for (const p of targets.values()) send(p, { type: "msg", msg: m, ttl: ttl - 1, from: self });
-  }
+  if (ttl > 0) forward(m, ttl, hop);
   return stored;
+}
+
+/** Flood `m` onward: every same-device peer, the relays, a random remote sample, and a unicast's target. */
+function forward(m: MeshMessage, ttl: number, hop?: string): void {
+  const alive = membership.alivePeers().filter((p) => p.id !== hop);
+  const local = alive.filter((p) => p.device === DEVICE);
+  const away = alive.filter((p) => p.device !== DEVICE);
+  const relays = sample(away.filter((p) => !!p.advertise), MSG_RELAYS);
+  const others = sample(away.filter((p) => !p.advertise), MSG_FANOUT);
+  // A unicast we can address directly always goes straight to its target too.
+  const direct = m.to ? alive.find((p) => p.id === m.to) : undefined;
+  const targets = new Map<string, PeerInfo>();
+  for (const p of [...local, ...relays, ...others, ...(direct ? [direct] : [])]) targets.set(p.id, p);
+  for (const p of targets.values()) send(p, { type: "msg", msg: m, ttl: ttl - 1, from: self });
 }
 
 /** Originate a message from this node (HTTP POST /send). */
@@ -698,6 +703,16 @@ createServer((req, res) => {
     req.on("end", () => {
       try {
         const body = JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}") as Record<string, unknown>;
+        // {resend: <id>}: flood a message this node already holds once more. Same id, so
+        // everyone who has it drops it; a node that joined mid-track finally gets it.
+        if (typeof body.resend === "string") {
+          const known = inbox.find((x) => x.id === body.resend);
+          if (!known) { res.statusCode = 404; res.end(JSON.stringify({ error: "no such message in this node's inbox" })); return; }
+          const { receivedAt: _r, hop: _h, assignment: _a, ...wire } = known;
+          forward(wire, MSG_TTL);
+          res.end(JSON.stringify({ ok: true, id: known.id, resent: true }));
+          return;
+        }
         if (typeof body.kind !== "string" || !body.kind) {
           res.statusCode = 400;
           res.end(JSON.stringify({ error: "kind (string) is required" }));

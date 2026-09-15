@@ -24,12 +24,15 @@
  *   GET    /api/geo                    location table (devices + defended assets)
  *   PUT    /api/geo/<id>               {kind, lat, lng, label?} → place/move; broadcast to the mesh
  *   DELETE /api/geo/<id>               remove an entry; broadcast
+ *   POST   /api/geo/seed               place the demo Singapore layout (assets + unplaced devices); broadcast
  *   POST   /api/tracks/<id>/<action>   action ∈ neutralise | handover | engaging, body {station?, note?, override?}
  *                                      → lifecycle message from this device; only the
  *                                      responsible device is accepted (override = Command)
  *   POST   /api/sim/tracks             {threat, origin:{lat,lng}, target:<geo id>, etaMs?, station?, note?}
  *                                      → launch a simulated incoming target (≤3 live per device)
  *   DELETE /api/sim/tracks/<id>        cancel it (sends track.lost)
+ *   GET    /api/sim/scenarios          scripted scenarios (several launches against one target)
+ *   POST   /api/sim/scenarios/<id>     {target?, station?} → run one; target defaults to the first defended asset
  *   POST   /api/signal                 {threat, station?, note?, via?} → a GCS signal:
  *                                      sent as a data-channel message through one
  *                                      node, flooded to every device on the mesh;
@@ -51,6 +54,7 @@ import { extname, join, normalize } from "node:path";
 import { ADVERTISE, DEVICE, DEVICE_SLUG, ProcManager, ROOT } from "./procman.js";
 import { GeoStore } from "./geo.js";
 import { Simulator } from "./simulator.js";
+import { SCENARIOS, ScenarioRunner, seedEntries } from "./scenarios.js";
 import type { InboxMessage, LighthouseView, LogEvent, MeshState, NodeStatus, NodeView, ProcSpec, ProcState, RemoteMember, ThreatAssignmentEvent, ThreatType, Track, TrackView } from "./types.js";
 
 const portFlag = process.argv.indexOf("--port");
@@ -119,8 +123,24 @@ async function sendMessage(kind: string, body: Record<string, unknown>, station?
 }
 const sendViaLocalNode = async (kind: string, body: Record<string, unknown>): Promise<boolean> => !!(await sendMessage(kind, body));
 
+/** Re-flood a message this device already sent (by id) so late joiners get it; any local node holding it can do so. */
+async function resendMessage(id: string): Promise<boolean> {
+  const nodes = procman.list().filter((p) => p.kind === "node" && p.running && p.httpPort).sort(() => Math.random() - 0.5);
+  for (const n of nodes.slice(0, 2)) {
+    try {
+      const r = await fetch(`http://127.0.0.1:${n.httpPort}/send`, {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ resend: id }), signal: AbortSignal.timeout(1_000),
+      });
+      if (r.ok) return true;
+    } catch { /* try the next node */ }
+  }
+  return false;
+}
+
 // ---------- simulated targets ----------
-const sim = new Simulator(sendMessage, () => lastState.tracks, (line) => broadcast("log", { source: "backend", line, ts: Date.now() } satisfies LogEvent));
+const sim = new Simulator(sendMessage, () => lastState.tracks, (line) => broadcast("log", { source: "backend", line, ts: Date.now() } satisfies LogEvent), resendMessage);
+const scenarios = new ScenarioRunner(sim, (line) => broadcast("log", { source: "backend", line, ts: Date.now() } satisfies LogEvent));
 
 function broadcastGeo(): void {
   const t = geo.get();
@@ -498,8 +518,9 @@ const server = createServer(async (req, res) => {
 
     // Crash every process but keep the specs — the whole fleet can be revived.
     if (path === "/api/stop-all" && method === "POST") {
+      const droppedLaunches = scenarios.cancelPending(); // a scenario must not keep launching into a stopped fleet
       procman.killAll();
-      return json(res, 200, { ok: true });
+      return json(res, 200, { ok: true, droppedLaunches });
     }
 
     // Shut down the backend itself (and its children) — Ctrl+C for scripts,
@@ -566,6 +587,37 @@ const server = createServer(async (req, res) => {
       broadcastGeo();
       broadcast("log", { source: "backend", line: `placed ${entry.kind} ${entry.label ?? id} at ${entry.lat.toFixed(4)}, ${entry.lng.toFixed(4)} (table v${geo.get().version})`, ts: Date.now() } satisfies LogEvent);
       return json(res, 200, geo.get());
+    }
+
+    // Demo layout: add whatever is missing (assets + unplaced devices) in one version bump.
+    if (path === "/api/geo/seed" && method === "POST") {
+      const devices = [DEVICE, ...new Set(lastState.remotes.map((r) => r.device).filter((d): d is string => !!d))];
+      const added = seedEntries(geo.get(), devices);
+      const n = Object.keys(added).length;
+      if (n) {
+        geo.setMany(added);
+        broadcastGeo();
+        broadcast("log", { source: "backend", line: `seeded demo layout: ${Object.entries(added).map(([id, e]) => e.label ?? id).join(", ")} (table v${geo.get().version})`, ts: Date.now() } satisfies LogEvent);
+      }
+      return json(res, 200, { ...geo.get(), added: n });
+    }
+
+    // Scripted scenarios: several simulated launches against one target.
+    if (path === "/api/sim/scenarios" && method === "GET") return json(res, 200, { scenarios: SCENARIOS });
+    const scMatch = path.match(/^\/api\/sim\/scenarios\/([^/]+)$/);
+    if (scMatch && method === "POST") {
+      const scId = decodeURIComponent(scMatch[1]);
+      const sc = SCENARIOS.find((s) => s.id === scId);
+      if (!sc) return json(res, 404, { error: `no scenario "${scId}" — GET /api/sim/scenarios lists them` });
+      const body = await readJson(req);
+      const entries = geo.get().entries;
+      const targetId = typeof body.target === "string" && body.target ? body.target
+        : Object.keys(entries).find((id) => entries[id].kind === "asset") ?? Object.keys(entries).find((id) => id !== DEVICE) ?? "";
+      const target = entries[targetId];
+      if (!target) return json(res, 400, { error: targetId ? `target "${targetId}" is not on the map` : "nothing on the map to attack — place an asset, or POST /api/geo/seed" });
+      if (!procman.list().some((p) => p.kind === "node" && p.running)) return json(res, 409, { error: "no local node is running — boot the demo first" });
+      const station = typeof body.station === "string" && body.station.trim() ? body.station.trim() : undefined;
+      return json(res, 202, scenarios.run(sc, { id: targetId, lat: target.lat, lng: target.lng }, station));
     }
 
     // Simulated incoming targets (GCS scenario launcher).
