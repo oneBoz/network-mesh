@@ -1,9 +1,23 @@
+import { useEffect, useState } from "react";
 import type { LighthouseView as LhView, LogEvent, MeshState } from "./types";
 import { EventLog } from "./EventLog";
 import { systemOf } from "./defense";
 
 const ago = (ms: number) => (ms < 1_000 ? "now" : ms < 60_000 ? `${Math.round(ms / 1000)}s ago` : `${Math.round(ms / 60_000)}m ago`);
 const uptime = (ms: number) => (ms < 60_000 ? `${Math.round(ms / 1000)}s` : ms < 3_600_000 ? `${Math.round(ms / 60_000)}m` : `${(ms / 3_600_000).toFixed(1)}h`);
+
+/** A clock that ticks once a second. The control plane only pushes a registry
+ *  when it changes, so "last seen … ago" and uptime keep time here instead. */
+function useNow(everyMs = 1_000): number {
+  const [now, setNow] = useState(Date.now);
+  useEffect(() => {
+    const t = setInterval(() => setNow(Date.now()), everyMs);
+    return () => clearInterval(t);
+  }, [everyMs]);
+  return now;
+}
+
+const isLighthouseSource = (e: LogEvent) => e.source.startsWith("lh-") || /lighthouse|REJECTED|id conflict|moved/.test(e.line);
 
 /**
  * Lighthouse mode: what this device's lighthouses see. A lighthouse is the
@@ -20,7 +34,6 @@ export function LighthouseModeView({ state, events }: { state: MeshState; events
   const rejected = lhs.reduce((n, l) => n + l.rejected, 0);
   const joins = lhs.reduce((n, l) => n + l.joins, 0);
   const signing = lhs.some((l) => l.reachable && l.signing);
-  const isLighthouseSource = (e: LogEvent) => e.source.startsWith("lh-") || /lighthouse|REJECTED|id conflict|moved/.test(e.line);
 
   return (
     <div className="lh-view">
@@ -57,6 +70,7 @@ export function LighthouseModeView({ state, events }: { state: MeshState; events
 }
 
 function LighthouseCard({ lh, device }: { lh: LhView; device: string }) {
+  const now = useNow();
   const byDevice = new Map<string, number>();
   for (const e of lh.entries) byDevice.set(e.device ?? "?", (byDevice.get(e.device ?? "?") ?? 0) + 1);
   return (
@@ -67,7 +81,7 @@ function LighthouseCard({ lh, device }: { lh: LhView; device: string }) {
         <span className="muted">udp/{lh.port}</span>
         <span className="spacer" />
         {lh.reachable ? (
-          <span className="muted">up {uptime(lh.uptimeMs)} · {lh.joins} joins · <span className={lh.rejected ? "lh-bad" : undefined}>{lh.rejected} rejected</span></span>
+          <span className="muted">up {uptime(now - lh.startedAt)} · {lh.joins} joins · <span className={lh.rejected ? "lh-bad" : undefined}>{lh.rejected} rejected</span></span>
         ) : (
           <span className="muted">{lh.port ? "not running" : ""}</span>
         )}
@@ -84,7 +98,8 @@ function LighthouseCard({ lh, device }: { lh: LhView; device: string }) {
               </thead>
               <tbody>
                 {lh.entries.map((e) => {
-                  const stale = e.ageMs > 60_000;
+                  const age = now - e.lastSeen;
+                  const stale = age > 60_000;
                   const local = e.device === device;
                   return (
                     <tr key={e.id} style={stale ? { opacity: 0.45 } : undefined} title={`${e.service ?? ""} · observed at ${e.host}:${e.port}${e.advertise ? ` (advertised ${e.advertise})` : ""}`}>
@@ -92,7 +107,7 @@ function LighthouseCard({ lh, device }: { lh: LhView; device: string }) {
                       <td style={{ textAlign: "left" }}>{e.device ?? "?"}{local && <span className="mine-tag" style={{ marginLeft: 6 }}>here</span>}</td>
                       <td style={{ textAlign: "left", fontFamily: "Consolas, 'Cascadia Mono', monospace", fontSize: 11.5 }}>{e.host}:{e.port}{e.advertise ? " ⟡" : ""}</td>
                       <td>{e.inc}</td>
-                      <td className={stale ? "lh-bad" : undefined}>{ago(e.ageMs)}</td>
+                      <td className={stale ? "lh-bad" : undefined}>{ago(age)}</td>
                     </tr>
                   );
                 })}

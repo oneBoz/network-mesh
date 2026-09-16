@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { memo, useEffect, useRef } from "react";
 import type { LogEvent } from "./types";
 
 const PALETTE = ["#3e9bff", "#2dd4a7", "#f5b841", "#8b7cf6", "#ff8fa3", "#5eead4", "#fbbf24", "#c4b5fd"];
@@ -19,8 +19,10 @@ function lineClass(line: string): string | undefined {
 }
 
 /** Live stdout of mesh processes, streamed from the backend over SSE.
- *  `filter` narrows to some sources (e.g. only lighthouses). */
-export function EventLog({ events, title = "Live log", filter, height }: {
+ *  `filter` narrows to some sources (e.g. only lighthouses). Memoised: the
+ *  log only re-renders when a batch of lines lands, not on every state push
+ *  (pass a stable `filter`, or it re-renders anyway). */
+export const EventLog = memo(function EventLog({ events, title = "Live log", filter, height }: {
   events: LogEvent[]; title?: string; filter?: (e: LogEvent) => boolean; height?: number;
 }) {
   const ref = useRef<HTMLDivElement>(null);
@@ -44,7 +46,7 @@ export function EventLog({ events, title = "Live log", filter, height }: {
         {shown.map((e, i) => {
           const text = e.line.replace(/^\[[^\]]*\] \[[^\]]*\] /, ""); // strip node.ts's own timestamp+id prefix
           return (
-            <div key={i} className={lineClass(text)}>
+            <div key={e.id ?? i} className={lineClass(text)}>
               <span className="src" style={{ color: colorFor(e.source) }}>{e.source}</span>
               <span>{text}</span>
             </div>
@@ -54,4 +56,4 @@ export function EventLog({ events, title = "Live log", filter, height }: {
       </div>
     </div>
   );
-}
+});

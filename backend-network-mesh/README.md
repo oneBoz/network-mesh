@@ -35,6 +35,7 @@ The demo mesh runs one server site per defense system:
 
     npm install       # dev tooling (tsx, typescript)
     npm run typecheck # verify everything compiles
+    npm run build     # compile to dist/ — what Docker and `npm start` run, with no loader
 
 Optional: put `MESH_KEY=<shared secret>` in your environment before starting
 anything if you want encrypted gossip — the control plane passes it through to
@@ -42,9 +43,17 @@ every process it spawns.
 
 ## Run the control plane
 
-    npm run dev    # dashboard control plane on http://127.0.0.1:7070
+    npm run dev    # dashboard control plane on http://127.0.0.1:7070 (sources, via tsx)
+    npm start      # the same from dist/ after `npm run build` — plain `node`, no loader
 
 (7070, not 7000: macOS AirPlay Receiver already listens on 7000 on every Mac.)
+
+The control plane spawns its children the way it runs itself: through tsx
+under `npm run dev`, as `node dist/src/<entry>.js` under `npm start` and in
+Docker. Plain `node` starts each mesh process in about a third of the time and
+with about half the memory of `node --import tsx` (which also keeps an esbuild
+service process alive per Node process), and the Docker image then ships no
+`node_modules` at all — the whole system is Node built-ins.
 
 Environment knobs, all optional:
 
@@ -70,7 +79,8 @@ http://127.0.0.1:7070 — by default from a sibling checkout at
 ### Control-plane API (all JSON)
 
     GET    /api/state                  current MeshState
-    GET    /api/events                 SSE stream: `state` + `log` events
+    GET    /api/events                 SSE stream: `state` (full on connect, then only the
+                                       slices that changed), `log`, `message`, `threat`, `geo`
     POST   /api/demo                   boot 3 lighthouses + 5 defense-system nodes
     POST   /api/stop-all               crash everything (specs kept for revive)
     POST   /api/quit                   stop everything AND exit the backend
@@ -106,9 +116,23 @@ changes.
 
 `MeshState.lighthouses` is each local lighthouse's registry, polled from its
 loopback `--http` API (the control plane allocates ports from 9001): entries
-with observed address, device, incarnation and age, plus joins and rejected
-packet counts. The SSE stream replays the last 300 log lines to a new client
-so a fresh tab is not empty.
+with observed address, device, incarnation and `lastSeen`, plus joins and
+rejected packet counts and the process's `startedAt` (ages and uptime are the
+reader's to compute, so an idle registry reads the same every second). The SSE
+stream replays the last 300 log lines to a new client so a fresh tab is not
+empty.
+
+**What the SSE stream sends.** The poller runs once a second (the four fetch
+rounds — `/members`, `/inbox`, `/tracks`, `/registry` — concurrently, and the
+next round is armed only after the previous one finished). A new client gets
+the full `MeshState` as its first `state` event; after that a `state` event
+carries only the top-level slices whose JSON changed since the last push
+(plus `ts`), and nothing is sent while nothing changes. The dashboard merges
+each patch over what it has, so an untouched slice keeps its identity and the
+panels reading it skip their work. `messages` never travels in a patch: each
+data-channel message is pushed as its own `message` event when first seen and
+again whenever another local node reports it (`seenBy`/`agree` change).
+`GET /api/state` always returns the complete snapshot, messages included.
 
 `MeshState.geo` is the location table: Command-owned, versioned, last writer
 wins. The control plane that edits it persists it under `DATA_DIR` and floods

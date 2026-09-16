@@ -21,6 +21,9 @@ const BASEMAP_KEY = "mesh-map-basemap";
 type Basemap = "auto" | "offline";
 const LABEL_ZOOM = 12; // planning-area names appear from this zoom in
 
+/** The Leaflet layers of one drawn track, reused across updates. */
+interface TrackLayers { line: L.Polyline; toTarget: L.Polyline; head: L.Marker; origin: L.CircleMarker; html: string }
+
 interface Placeable {
   id: string;
   kind: GeoEntry["kind"];
@@ -119,7 +122,7 @@ export function MapPanel({ state, editable, height = 340, onError, pickOrigin, o
       setNewAsset("");
     });
     map.current = m;
-    return () => { m.remove(); map.current = null; };
+    return () => { m.remove(); map.current = null; markers.current.clear(); trackLayers.current.clear(); };
   }, []);
 
   // Basemap mode. The bundled GeoJSON (~60 KB, src/basemap/) is a separate
@@ -144,60 +147,109 @@ export function MapPanel({ state, editable, height = 340, onError, pickOrigin, o
     return () => { cancelled = true; };
   }, [basemap, drawn]);
 
-  // Redraw markers whenever the table or statuses change.
+  // Markers: one per placed item, kept across renders. A push that changes a
+  // status, a label or a position updates the marker in place; only items that
+  // appear or vanish add or remove a marker. (The effect itself only runs when
+  // one of its slices changed — the control plane pushes patches, not snapshots.)
+  const markers = useRef(new Map<string, L.Marker>());
   useEffect(() => {
     const m = map.current, g = layer.current;
     if (!m || !g) return;
-    g.clearLayers();
+    const seen = new Set<string>();
     for (const p of items) {
       if (!p.placed) continue;
-      const mk = L.marker([p.placed.lat, p.placed.lng], { icon: icon(p, selected === p.id), draggable: editable, title: p.label });
-      mk.bindTooltip(`<b>${p.label}</b>${p.sub ? `<br>${p.sub}` : ""}<br>${p.placed.lat.toFixed(4)}, ${p.placed.lng.toFixed(4)}`, { direction: "top", offset: [0, -14] });
+      seen.add(p.id);
+      const at: L.LatLngTuple = [p.placed.lat, p.placed.lng];
+      const ic = icon(p, selected === p.id);
+      const tip = `<b>${p.label}</b>${p.sub ? `<br>${p.sub}` : ""}<br>${p.placed.lat.toFixed(4)}, ${p.placed.lng.toFixed(4)}`;
+      let mk = markers.current.get(p.id);
+      if (!mk) {
+        mk = L.marker(at, { icon: ic, draggable: editable, title: p.label }).bindTooltip(tip, { direction: "top", offset: [0, -14] }).addTo(g);
+        markers.current.set(p.id, mk);
+      } else {
+        const cur = mk.getLatLng();
+        if (cur.lat !== at[0] || cur.lng !== at[1]) mk.setLatLng(at);
+        if ((mk.getIcon() as L.DivIcon).options.html !== ic.options.html) mk.setIcon(ic);
+        mk.setTooltipContent(tip);
+      }
       if (editable) {
-        mk.on("dragend", () => {
-          const ll = mk.getLatLng();
+        const marker = mk;
+        marker.off("dragend").on("dragend", () => {
+          const ll = marker.getLatLng();
           api.placeGeo(p.id, { kind: p.kind, lat: ll.lat, lng: ll.lng, label: p.kind === "asset" ? p.label : undefined })
             .catch((err: Error) => onError?.(err.message));
         });
       }
-      mk.addTo(g);
+    }
+    for (const [id, mk] of markers.current) {
+      if (seen.has(id)) continue;
+      g.removeLayer(mk);
+      markers.current.delete(id);
     }
   }, [state.geo.version, state.remotes, state.procs, selected, editable]);
 
   // Trajectories: polyline + heading arrow at the head, label with state and ETA,
-  // dashed line to the target, ✖ at impact. Marker moves are CSS-transitioned
-  // (see styles) so 1 Hz updates look continuous.
+  // dashed line to the target, ✖ at impact. Layers are kept per track and
+  // updated in place: the head marker's element survives each 1 Hz update, so
+  // the CSS transition on its transform (see styles) makes the motion continuous.
+  const trackLayers = useRef(new Map<string, TrackLayers>());
   useEffect(() => {
     const g = trackLayer.current;
     if (!g) return;
-    g.clearLayers();
     const now = Date.now();
+    const seen = new Set<string>();
     for (const t of state.tracks) {
       if (!t.positions.length) continue;
       const finishedAt = t.neutralised?.at ?? t.lostAt ?? t.impactAt;
       if (finishedAt && now - finishedAt > RECENT_MS) continue;
+      seen.add(t.trackId);
       const live = t.state === "detected" || t.state === "engaging";
       const color = THREAT_COLOR[t.threat] ?? "#fff";
       const pts = t.positions.map((p) => [p.lat, p.lng] as L.LatLngTuple);
       const head = t.positions[t.positions.length - 1];
-      L.polyline(pts, { color, weight: live ? 2.5 : 1.5, opacity: live ? 0.9 : 0.4, dashArray: live ? undefined : "4 6" }).addTo(g);
       const target = t.target ? state.geo.entries[t.target] : undefined;
-      if (target && live) L.polyline([[head.lat, head.lng], [target.lat, target.lng]], { color, weight: 1, opacity: 0.35, dashArray: "2 8" }).addTo(g);
       const eta = head.eta !== undefined && live ? ` · ETA ${Math.max(0, Math.round(head.eta / 1000))}s` : "";
       const stateTxt = t.state === "neutralised" ? "✔ NEUTRALISED" : t.state === "impact" ? "✖ IMPACT" : t.state === "lost" ? "lost" : t.state === "engaging" ? "engaging" : "inbound";
       const rot = head.heading ?? 0;
-      const html = t.state === "impact"
+      const glyph = t.state === "impact"
         ? `<div class="track-head impact" style="--c:${color}">✖</div>`
         : t.state === "neutralised"
           ? `<div class="track-head done" style="--c:${color}">✔</div>`
           : `<div class="track-head${live ? " live" : ""}" style="--c:${color};transform:rotate(${rot}deg)">${THREAT_GLYPH[t.threat] ?? "●"}</div>`;
-      const mk = L.marker([head.lat, head.lng], {
-        icon: L.divIcon({ className: "track-icon", html: `${html}<div class="track-label" style="--c:${color}">${t.threat.toUpperCase()} ${stateTxt}${eta}<br><span>→ ${t.target ? (state.geo.entries[t.target]?.label ?? t.target) : "?"} · ${t.responsibleDevice ?? "nobody"}</span></div>`, iconSize: [24, 24], iconAnchor: [12, 12] }),
-        interactive: true, zIndexOffset: 500,
-      });
-      mk.bindTooltip(`<b>${t.threat}</b> ${t.trackId}<br>from ${t.origin.station ?? t.origin.node}@${t.origin.device ?? "?"}<br>state: ${t.state}<br>responsible: ${t.responsibleDevice ?? "nobody"} (${t.responsibleNode ?? "-"})<br>${t.positions.length} positions${head.speed ? `, ${Math.round(head.speed * 3.6)} km/h` : ""}`, { direction: "top", offset: [0, -12] });
-      mk.addTo(g);
-      if (pts.length > 1) L.circleMarker(pts[0], { radius: 3, color, fillColor: color, fillOpacity: 0.8, weight: 1 }).addTo(g); // origin dot
+      const html = `${glyph}<div class="track-label" style="--c:${color}">${t.threat.toUpperCase()} ${stateTxt}${eta}<br><span>→ ${t.target ? (state.geo.entries[t.target]?.label ?? t.target) : "?"} · ${t.responsibleDevice ?? "nobody"}</span></div>`;
+      const tip = `<b>${t.threat}</b> ${t.trackId}<br>from ${t.origin.station ?? t.origin.node}@${t.origin.device ?? "?"}<br>state: ${t.state}<br>responsible: ${t.responsibleDevice ?? "nobody"} (${t.responsibleNode ?? "-"})<br>${t.positions.length} positions${head.speed ? `, ${Math.round(head.speed * 3.6)} km/h` : ""}`;
+      const lineStyle = { color, weight: live ? 2.5 : 1.5, opacity: live ? 0.9 : 0.4, dashArray: live ? undefined : "4 6" };
+      let tl = trackLayers.current.get(t.trackId);
+      if (!tl) {
+        tl = {
+          line: L.polyline(pts, lineStyle).addTo(g),
+          toTarget: L.polyline([], { color, weight: 1, opacity: 0.35, dashArray: "2 8" }).addTo(g),
+          head: L.marker([head.lat, head.lng], {
+            icon: L.divIcon({ className: "track-icon", html, iconSize: [24, 24], iconAnchor: [12, 12] }),
+            interactive: true, zIndexOffset: 500,
+          }).bindTooltip(tip, { direction: "top", offset: [0, -12] }).addTo(g),
+          origin: L.circleMarker(pts[0], { radius: 3, color, fillColor: color, fillOpacity: 0.8, weight: 1 }), // added once there is a trail
+          html,
+        };
+        trackLayers.current.set(t.trackId, tl);
+      } else {
+        tl.line.setLatLngs(pts);
+        tl.line.setStyle(lineStyle);
+        tl.head.setLatLng([head.lat, head.lng]);
+        if (tl.html !== html) {
+          const el = tl.head.getElement();
+          if (el) el.innerHTML = html; // in place: the element (and its transition) survive
+          tl.html = html;
+        }
+        tl.head.setTooltipContent(tip);
+      }
+      tl.toTarget.setLatLngs(target && live ? [[head.lat, head.lng], [target.lat, target.lng]] : []);
+      if (pts.length > 1 && !g.hasLayer(tl.origin)) tl.origin.addTo(g);
+    }
+    for (const [id, tl] of trackLayers.current) {
+      if (seen.has(id)) continue;
+      for (const l of [tl.line, tl.toTarget, tl.head, tl.origin]) g.removeLayer(l);
+      trackLayers.current.delete(id);
     }
   }, [state.tracks, state.geo.version]);
 

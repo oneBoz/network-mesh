@@ -80,10 +80,13 @@ export const api = {
 };
 
 /** Subscribe to the backend's SSE stream. Returns an unsubscribe function.
- *  `onConnected(false)` fires when the stream drops (EventSource keeps
- *  reconnecting on its own; the next state event flips it back to true). */
+ *  The first `state` event after each (re)connect is the full snapshot; every
+ *  later one carries only the slices that changed, so `onState` receives a
+ *  patch to merge over the previous state. `onConnected(false)` fires when the
+ *  stream drops (EventSource keeps reconnecting on its own; the next state
+ *  event flips it back to true). */
 export function subscribe(
-  onState: (s: MeshState) => void,
+  onState: (patch: Partial<MeshState>) => void,
   onLog: (e: LogEvent) => void,
   onConnected?: (up: boolean) => void,
   onThreat?: (t: ThreatAssignmentEvent) => void,

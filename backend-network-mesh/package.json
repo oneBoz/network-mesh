@@ -11,6 +11,8 @@
     "lighthouse": "tsx src/lighthouse.ts",
     "node": "tsx src/node.ts",
     "typecheck": "tsc --noEmit",
+    "build": "tsc -p tsconfig.build.json",
+    "start": "node dist/backend/src/server.js",
     "demo": "bash scripts/demo.sh",
     "dev": "tsx backend/src/server.ts",
     "backend": "tsx backend/src/server.ts",

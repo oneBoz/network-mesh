@@ -1,0 +1,13 @@
+{
+  // Emitting build (`npm run build`): the same sources tsconfig.json typechecks,
+  // compiled to dist/ so Docker (and `npm start`) run plain `node` with no loader.
+  // rootDir "." keeps the layout: dist/src/node.js, dist/backend/src/server.js.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "outDir": "dist",
+    "rootDir": ".",
+    "sourceMap": false
+  },
+  "include": ["src/**/*.ts", "backend/**/*.ts"]
+}

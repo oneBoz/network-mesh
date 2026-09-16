@@ -352,10 +352,70 @@ stream + map → offline fallback and scenarios.
 - Cold rehearsal from a fresh clone with `.env.example`: PASS (smoke,
   scenario, seed, token gate).
 
+### 2026-09-17 — Performance pass: compiled children, state patches, in-place map updates
+
+Measured first, on the Mac's Docker container with the demo fleet idle: the
+container sat at ~790 MB — nine `node --import tsx` processes at 106-113 MB
+each plus a 21 MB esbuild service process per Node process — and `/api/state`
+was 63 KB (`messages` alone 32 KB), re-sent to every dashboard tab once a
+second whether or not anything had changed. Each process took ~330 ms and
+~80 MB just to load tsx before running a line of mesh code.
+
+What changed:
+
+- **Compiled children.** `npm run build` (`tsconfig.build.json`) emits `dist/`;
+  Docker runs `node dist/backend/src/server.js`, and procman spawns children
+  the same way as its parent runs (`COMPILED` in procman.ts: plain
+  `node dist/src/<entry>.js` when compiled, tsx under `npm run dev`). The
+  runtime image ships no `node_modules`. `npm start` runs the compiled build
+  natively. `docker-compose.remote.yml` commands updated to match.
+- **Control plane.** The four poll phases run concurrently; the poll re-arms
+  after it completes instead of `setInterval` (a stalled node can no longer
+  make rounds overlap or publish out of order). `state` SSE events are patches
+  of the slices whose JSON changed — nothing at all while idle — with the full
+  snapshot on connect. `messages` left the state push: each message is its own
+  `message` event, re-sent when its agreement changes (housekeeping
+  `geo.locations` traffic stays out of it). Hashed `/assets/*` get
+  `cache-control: immutable`.
+- **Nodes.** `/members` answers compact JSON (it was pretty-printed for a 1 Hz
+  machine consumer); `/tracks` omits the trajectory of tracks finished more
+  than 120 s ago (the map stops drawing them at 90 s); `trimToFit` sizes a
+  packet from the JSON length plus the frame constant (`wireSize`) instead of
+  encrypting it once per dropped item; `Membership.peer()`/`status()` give O(1)
+  lookups where the lifecycle context and the path summary scanned copies of
+  the peer list; rumor send counters are bumped only for rumors that actually
+  left the node (`noteGossiped`); `sample()` is a partial Fisher-Yates.
+- **Lighthouse registry** reports `startedAt` and `lastSeen` instead of
+  `uptimeMs`/`ageMs`, so an idle registry does not change every second; the
+  Lighthouse view keeps its own one-second clock for "ago" and uptime.
+- **Frontend.** State patches merge over the previous snapshot, so untouched
+  slices keep their identity. MapPanel keeps its markers and track layers in a
+  map and updates them in place — the head marker's element now survives each
+  1 Hz update, which is what the 1 s CSS transition needed to make targets
+  glide instead of jump. EventLog keys rows by a monotonic id (index keys
+  shifted every flush) and is memoised. TopologyGraph memoises layout, gossip
+  web and per-node beliefs on the slices it reads, so a drag only moves
+  positions.
+
+After, same fleet, same machine: container ~285 MB (backend 105 MB, each
+child 74-78 MB, no esbuild processes); image 233 MB instead of 343 MB; on
+**Boot demo** all eight children log "up" within ~100 ms of being spawned
+(a single compiled process: 150-280 ms inside the container, 130-150 ms
+natively, against 360-540 ms via tsx); `/api/state` 26 KB; an idle SSE client
+receives a `state` patch only when a view or track actually changes (observed:
+a new remote peer, a relay-path change), typically under 20 KB. `npm test`
+23/23, `smoke.mjs` PASS with the Azure peers still on the previous build (the
+wire protocol is unchanged, so mixed builds interoperate).
+
+Field note: the very first boot after the first `--build` on the Mac showed a
+one-off ~9 s spawn-to-"up" gap for all eight children (cold image layers in
+the Docker Desktop VM, most likely); the next rebuild's first boot took
+93 ms. Boot the fleet once before the demo anyway.
+
 ## Verifying a build (checklist)
 
 ```sh
-cd backend-network-mesh && npm run typecheck && npm test
+cd backend-network-mesh && npm run typecheck && npm test && npm run build
 cd ../frontend-network-mesh && npm run typecheck && npm run build
 cd .. && docker compose up -d --build && node scripts/smoke.mjs     # PASS
 node scripts/scenario.mjs cruise-north                              # PASS (ends in IMPACT unless neutralised)

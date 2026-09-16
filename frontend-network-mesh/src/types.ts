@@ -47,8 +47,7 @@ export interface RegistryEntry {
   httpPort?: number;
   advertise?: string;
   inc: number;
-  lastSeen: number;
-  ageMs: number;
+  lastSeen: number; // ms epoch; age = now - lastSeen (computed by the reader, so an idle registry does not change every second)
 }
 
 /** A local lighthouse as seen through its registry API. */
@@ -60,7 +59,7 @@ export interface LighthouseView {
   registered: number;
   rejected: number; // packets dropped for a bad/missing signature or clock skew since start
   joins: number;
-  uptimeMs: number;
+  startedAt: number; // ms epoch the lighthouse process started; uptime = now - startedAt
   staleMs: number;
   entries: RegistryEntry[];
 }
@@ -217,7 +216,7 @@ export interface MeshState {
   threats: ThreatAssignmentEvent[]; // most recent last, capped
   remotes: RemoteMember[]; // members on other machines, derived from views
   extraLighthouses: string[]; // host:port of lighthouses on other machines (EXTRA_LIGHTHOUSES)
-  messages: InboxMessage[]; // data-channel messages, most recent last, capped
+  messages: InboxMessage[]; // data-channel messages, most recent last, capped (pushed as `message` events, never in `state` patches)
   geo: GeoTable; // locations of devices and defended assets (see GeoTable)
   lighthouses: LighthouseView[]; // local lighthouses' registries (Lighthouse mode)
   tracks: TrackView[]; // engagement lifecycle per target, merged across local nodes
@@ -225,6 +224,7 @@ export interface MeshState {
 }
 
 export interface LogEvent {
+  id?: number; // assigned by the dashboard on receipt: a stable React key for a scrolling window
   source: string; // proc name or "backend"
   line: string;
   ts: number;

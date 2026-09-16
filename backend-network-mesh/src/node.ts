@@ -228,7 +228,7 @@ function handleMessage(msg: Message, rinfo: { address: string; port: number }): 
       membership.upsertPeer(msg.from, true);
       membership.upsertPeer(msg.target);
       // Prefer our own known address for the target over the requester's copy.
-      const target = membership.allPeers().find((p) => p.id === msg.target.id) ?? msg.target;
+      const target = membership.peer(msg.target.id) ?? msg.target;
       const s = ++seq;
       pendingProxies.set(s, {
         origin: { host: msg.from.host, port: msg.from.port },
@@ -292,11 +292,14 @@ const inbox: StoredMessage[] = [];
 // ---------- engagement lifecycle (replicated state machine, see engagement.ts) ----------
 const engagement = createEngagement();
 const ENGAGE_TIMEOUT_OVERRIDE = Number(process.env.ENGAGE_TIMEOUT_MS) || undefined;
+// /tracks stops shipping a finished track's trajectory (up to MAX_POSITIONS points)
+// this long after it finished: it is polled every second and nothing draws it any more.
+const ARCHIVE_POSITIONS_AFTER_MS = 120_000;
 function lifecycleCtx(): EngagementContext {
   return {
     now: Date.now(),
-    deviceOf: (id) => (id === ID ? DEVICE : membership.allPeers().find((p) => p.id === id)?.device),
-    isAlive: (id) => id === ID || membership.alivePeers().some((p) => p.id === id),
+    deviceOf: (id) => (id === ID ? DEVICE : membership.peer(id)?.device),
+    isAlive: (id) => id === ID || membership.status(id) === "alive",
     deadFor: (id) => { const e = membership.entry(id); return e?.status === "dead" ? Date.now() - e.since : 0; },
     deadGraceMs: suspectTimeoutMs(), // a false conviction is refuted within about one suspect window
     engageTimeoutMs: (threat) => ENGAGE_TIMEOUT_OVERRIDE ?? DEFAULT_ENGAGE_TIMEOUT_MS[threat],
@@ -420,10 +423,12 @@ function handleThreat(event: ThreatEvent, ttl: number): Assignment | null {
   return a;
 }
 
+/** Uniform random n-subset of `arr` (shuffles `arr` in place). Partial
+ *  Fisher-Yates: only the first n slots are drawn, not the whole array. */
 function sample<T>(arr: T[], n: number): T[] {
   if (arr.length <= n) return arr;
-  for (let i = arr.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
+  for (let i = 0; i < n; i++) {
+    const j = i + Math.floor(Math.random() * (arr.length - i));
     [arr[i], arr[j]] = [arr[j], arr[i]];
   }
   return arr.slice(0, n);
@@ -447,12 +452,7 @@ function absorb(rumors: Rumor[], peers: PeerInfo[]): void {
 /** Peer addresses to piggyback: a random sample (so every address still
  *  spreads over time) capped to keep the datagram small, plus always us. */
 function piggybackPeers(): PeerInfo[] {
-  const all = membership.allPeers();
-  for (let i = all.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
-    [all[i], all[j]] = [all[j], all[i]];
-  }
-  return all.slice(0, MAX_PIGGYBACK - 1).concat(self);
+  return sample(membership.allPeers(), MAX_PIGGYBACK - 1).concat(self);
 }
 
 /** Attach rumors + peer addresses to a gossip packet, sized so the datagram
@@ -467,6 +467,7 @@ function withGossip(base: Record<string, unknown>): Message {
   const build = (ps: PeerInfo[], rs: Rumor[]): Message => ({ ...base, rumors: rs, peers: ps }) as Message;
   const peers = trimToFit(piggybackPeers(), (ps) => build(ps, rumors), { min: 1 }); // self is last → kept
   const fitRumors = trimToFit(rumors, (rs) => build(peers, rs), { fromBack: true, min: 1 });
+  membership.noteGossiped(fitRumors); // only what survived the trim counts as gossiped
   return build(peers, fitRumors);
 }
 
@@ -504,7 +505,7 @@ function noteRelayedAck(id: string): void {
 /** Public summary for /members: which peers we can only reach via a relay. */
 function pathSummary(): Record<string, "direct" | "relay"> {
   const out: Record<string, "direct" | "relay"> = {};
-  for (const [id, p] of paths) if (membership.allPeers().some((x) => x.id === id)) out[id] = p.mode;
+  for (const [id, p] of paths) if (membership.peer(id)) out[id] = p.mode;
   return out;
 }
 
@@ -745,10 +746,15 @@ createServer((req, res) => {
     });
   } else if (url === "/tracks") {
     // Engagement lifecycle as this node computed it (every node should agree).
+    // Polled once a second: tracks that finished a while ago go without their
+    // trajectory (ARCHIVE_POSITIONS_AFTER_MS) — the map has stopped drawing them.
     const ctx = lifecycleCtx();
-    res.end(JSON.stringify({ node: ID, device: DEVICE, tracks: serializeTracks(engagement).map((t) => ({
-      ...t, responsibleNode: responsibleNode(t), responsibleDevice: responsibleNode(t) ? ctx.deviceOf(responsibleNode(t)!) : undefined,
-    })) }));
+    res.end(JSON.stringify({ node: ID, device: DEVICE, tracks: serializeTracks(engagement).map((t) => {
+      const node = responsibleNode(t);
+      const finishedAt = t.neutralised?.at ?? t.lostAt ?? t.impactAt;
+      const archived = finishedAt !== undefined && ctx.now - finishedAt > ARCHIVE_POSITIONS_AFTER_MS;
+      return { ...t, positions: archived ? [] : t.positions, responsibleNode: node, responsibleDevice: node ? ctx.deviceOf(node) : undefined };
+    }) }));
   } else if (url.startsWith("/inbox")) {
     // GET /inbox?after=<receivedAt ms> → messages this node stored after that instant.
     const q = new URL(url, "http://x").searchParams;
@@ -769,10 +775,8 @@ createServer((req, res) => {
   } else if (url.startsWith("/engage/")) {
     serveThreat(res, url.slice("/engage/".length));
   } else if (url === "/members") {
-    res.end(JSON.stringify(
-      { self: { ...self, host: selfHost, inc: membership.selfInc }, view: membership.snapshot(), paths: pathSummary(), profile: PROFILE_NAME },
-      null, 2
-    ));
+    // Polled once a second per node by the control plane: compact, not pretty-printed.
+    res.end(JSON.stringify({ self: { ...self, host: selfHost, inc: membership.selfInc }, view: membership.snapshot(), paths: pathSummary(), profile: PROFILE_NAME }));
   } else if (url.startsWith("/resolve/")) {
     const svc = url.slice("/resolve/".length);
     const healthy = membership.healthy(svc)

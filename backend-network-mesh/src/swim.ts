@@ -64,6 +64,16 @@ export class Membership {
     return [...this.peers.values()];
   }
 
+  /** One peer's record — O(1); use instead of scanning allPeers(). */
+  peer(id: string): PeerInfo | undefined {
+    return this.peers.get(id);
+  }
+
+  /** One member's status, undefined if unknown — O(1). */
+  status(id: string): NodeStatus | undefined {
+    return this.view.get(id)?.status;
+  }
+
   /** Direct evidence: we just heard from this node. */
   markAlive(id: string, inc: number): void {
     this.transition(id, { id, status: "alive", inc });
@@ -111,7 +121,8 @@ export class Membership {
   /** Rumors to piggyback on the next message, capped at `limit` entries so
    *  packets stay under the UDP MTU as the mesh grows. Our own alive rumor is
    *  always first; the rest go least-recently-gossiped first, so every rumor
-   *  still reaches everyone — just spread over several packets. */
+   *  still reaches everyone — just spread over several packets. Report what
+   *  actually went out with noteGossiped(): the size trim may drop some. */
   rumors(limit = Infinity): Rumor[] {
     const out: Rumor[] = [{ id: this.selfId, status: "alive", inc: this.selfInc }];
     const entries = [...this.view.entries()].sort(
@@ -120,9 +131,13 @@ export class Membership {
     for (const [id, e] of entries) {
       if (out.length >= limit) break;
       out.push({ id, status: e.status, inc: e.inc });
-      this.sends.set(id, (this.sends.get(id) ?? 0) + 1);
     }
     return out;
+  }
+
+  /** Count a send for each rumor that made it onto the wire. */
+  noteGossiped(sent: Rumor[]): void {
+    for (const r of sent) if (r.id !== this.selfId) this.sends.set(r.id, (this.sends.get(r.id) ?? 0) + 1);
   }
 
   /** Peers we might productively probe (not known-dead). */

@@ -28,8 +28,14 @@ export const ADVERTISE = process.env.ADVERTISE?.trim() || undefined;
  *  without this anyone who can reach them could inject threats or read views. */
 export const NODE_API_TOKEN = process.env.NODE_API_TOKEN?.trim() || randomBytes(16).toString("hex");
 
-/** Repo root — cwd for children so `tsx` and src/ resolve. */
-export const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
+/** True when this is the compiled build (dist/backend/src/*.js) rather than the
+ *  sources run through tsx. Children are launched the same way as the parent:
+ *  plain `node dist/src/<entry>.js` needs no loader and no esbuild service
+ *  process, starts in a fraction of the time and uses about half the memory. */
+export const COMPILED = import.meta.url.endsWith(".js");
+/** Package root (backend-network-mesh/) — cwd for children so src/ or dist/ resolves. */
+const HERE = dirname(fileURLToPath(import.meta.url));
+export const ROOT = COMPILED ? join(HERE, "..", "..", "..") : join(HERE, "..", "..");
 
 const ANSI = /\x1b\[[0-9;]*m/g; // node.ts colors its logs; the browser gets plain text
 
@@ -88,8 +94,8 @@ export class ProcManager {
     if (running(this.procs.get(spec.name))) {
       throw new Error(`${spec.name} is already running`);
     }
-    const entry = spec.kind === "lighthouse" ? "src/lighthouse.ts" : "src/node.ts";
-    const args = ["--import", "tsx", entry];
+    const entry = spec.kind === "lighthouse" ? "lighthouse" : "node";
+    const args = COMPILED ? [`dist/src/${entry}.js`] : ["--import", "tsx", `src/${entry}.ts`];
     if (spec.kind === "lighthouse") {
       args.push("--port", String(spec.port));
       if (spec.httpPort) args.push("--http", String(spec.httpPort)); // loopback registry API for the dashboard

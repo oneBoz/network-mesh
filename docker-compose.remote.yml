@@ -20,7 +20,7 @@ services:
     environment:
       MESH_KEY: ${MESH_KEY:?set MESH_KEY — a public lighthouse must never run in plaintext}
       REQUIRE_MESH_KEY: "1"
-    command: ["node", "--import", "tsx", "src/lighthouse.ts", "--port", "5001"]
+    command: ["node", "dist/src/lighthouse.js", "--port", "5001"]
     healthcheck: { disable: true }   # the image healthcheck probes the dashboard port, absent here
     restart: unless-stopped
 
@@ -32,9 +32,7 @@ services:
       MESH_KEY: ${MESH_KEY:?set MESH_KEY — a public lighthouse must never run in plaintext}
     command:
       - node
-      - --import
-      - tsx
-      - src/node.ts
+      - dist/src/node.js
       - --id
       - ${SITE_ID:-vps-1}
       - --service

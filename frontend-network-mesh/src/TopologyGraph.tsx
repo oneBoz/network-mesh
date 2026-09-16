@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { MeshState, NodeStatus, RemoteMember, ThreatAssignmentEvent } from "./types";
 import { consensus } from "./consensus";
 import { defenseTooltip, systemName, systemOf } from "./defense";
@@ -135,56 +135,94 @@ export function TopologyGraph({
     cancelLinking();
   };
 
-  const lighthouses = state.procs.filter((p) => p.kind === "lighthouse");
-  const nodes = state.procs.filter((p) => p.kind === "node");
-  // Members on other machines (learned via gossip) and the external lighthouses
-  // they were reached through. Drawn as first-class glyphs, but read-only.
-  const remotes = state.remotes;
-  const remoteDevices = groupRemotes(remotes);
-  const extraLh = state.extraLighthouses;
-  const remoteIds = new Set(remotes.map((r) => r.id));
-  const deviceOfRemote = new Map<string, string>(); // remote node id → device id
-  for (const d of remoteDevices) for (const m of d.members) deviceOfRemote.set(m.id, devId(d.device));
-  // In collapsed view a remote node is represented by its device card.
-  const glyphFor = (id: string) => (view.collapse ? deviceOfRemote.get(id) ?? id : id);
+  // Everything derived from the mesh state — glyph lists, default layout, the
+  // gossip web and each node's consensus belief — is memoised on the slices it
+  // reads. Drags (setPos) and threat highlights then only touch positions.
+  const derived = useMemo(() => {
+    const lighthouses = state.procs.filter((p) => p.kind === "lighthouse");
+    const nodes = state.procs.filter((p) => p.kind === "node");
+    // Members on other machines (learned via gossip) and the external lighthouses
+    // they were reached through. Drawn as first-class glyphs, but read-only.
+    const remotes = state.remotes;
+    const remoteDevices = groupRemotes(remotes);
+    const extraLh = state.extraLighthouses;
+    const remoteIds = new Set(remotes.map((r) => r.id));
+    const deviceOfRemote = new Map<string, string>(); // remote node id → device id
+    for (const d of remoteDevices) for (const m of d.members) deviceOfRemote.set(m.id, devId(d.device));
+    // In collapsed view a remote node is represented by its device card.
+    const glyphFor = (id: string) => (view.collapse ? deviceOfRemote.get(id) ?? id : id);
 
-  // ---------- default positions ----------
-  const defaults = new Map<string, XY>();
-  const lhSlots = lighthouses.length + extraLh.length;
-  lighthouses.forEach((p, i) =>
-    defaults.set(p.name, { x: ((i + 1) * W) / (lhSlots + 1), y: 52 })
-  );
-  extraLh.forEach((addr, j) =>
-    defaults.set(xlhId(addr), { x: ((lighthouses.length + j + 1) * W) / (lhSlots + 1), y: 52 })
-  );
-  // Local nodes on a circle, shifted left to make room for the remote devices.
-  const shift = remoteDevices.length ? (view.collapse ? 60 : Math.min(2, remoteDevices.length) * 62) : 0;
-  const cx = W / 2 - shift, cy = 310, r = Math.min(185, 60 + nodes.length * 22);
-  nodes.forEach((p, i) => {
-    const a = (2 * Math.PI * i) / nodes.length - Math.PI / 2;
-    defaults.set(p.name, { x: cx + r * Math.cos(a), y: cy + r * Math.sin(a) });
-  });
-  const colX = (k: number) => W - 62 - (remoteDevices.length - 1 - k) * COL_W;
-  remoteDevices.forEach((d, k) => {
-    // Collapsed: cards stacked down the right edge. Expanded: one column per device.
-    const span = H - 210;
-    defaults.set(devId(d.device), { x: W - 75, y: 120 + ((k + 0.5) * span) / remoteDevices.length });
-    d.members.forEach((m, j) => {
-      defaults.set(m.id, { x: colX(k), y: 140 + ((j + 0.5) * span) / d.members.length });
+    // ---------- default positions ----------
+    const defaults = new Map<string, XY>();
+    const lhSlots = lighthouses.length + extraLh.length;
+    lighthouses.forEach((p, i) =>
+      defaults.set(p.name, { x: ((i + 1) * W) / (lhSlots + 1), y: 52 })
+    );
+    extraLh.forEach((addr, j) =>
+      defaults.set(xlhId(addr), { x: ((lighthouses.length + j + 1) * W) / (lhSlots + 1), y: 52 })
+    );
+    // Local nodes on a circle, shifted left to make room for the remote devices.
+    const shift = remoteDevices.length ? (view.collapse ? 60 : Math.min(2, remoteDevices.length) * 62) : 0;
+    const cx = W / 2 - shift, cy = 310, r = Math.min(185, 60 + nodes.length * 22);
+    nodes.forEach((p, i) => {
+      const a = (2 * Math.PI * i) / nodes.length - Math.PI / 2;
+      defaults.set(p.name, { x: cx + r * Math.cos(a), y: cy + r * Math.sin(a) });
     });
-  });
+    const colX = (k: number) => W - 62 - (remoteDevices.length - 1 - k) * COL_W;
+    remoteDevices.forEach((d, k) => {
+      // Collapsed: cards stacked down the right edge. Expanded: one column per device.
+      const span = H - 210;
+      defaults.set(devId(d.device), { x: W - 75, y: 120 + ((k + 0.5) * span) / remoteDevices.length });
+      d.members.forEach((m, j) => {
+        defaults.set(m.id, { x: colX(k), y: 140 + ((j + 0.5) * span) / d.members.length });
+      });
+    });
+
+    // ---------- router endpoints ----------
+    const glyphNames = new Set([
+      ...state.procs.map((p) => p.name),
+      ...(view.collapse ? remoteDevices.map((d) => devId(d.device)) : remotes.map((m) => m.id)),
+    ]);
+    // Default router links name services ("aegis"); a fleet joined to other
+    // machines runs as "aegis-<device>", so resolve link endpoints by service too.
+    const byService = new Map<string, string>();
+    for (const p of nodes) if (p.service && !byService.has(p.service)) byService.set(p.service, p.name);
+
+    // ---------- gossip web ----------
+    // An edge from each reachable observer to every peer it believes alive,
+    // deduped by unordered pair so A↔B is drawn once. In collapsed view every
+    // edge to a remote node lands on its device card (and is deduped there too).
+    const nodeNames = new Set(nodes.map((p) => p.name));
+    const edgeMap = new Map<string, { from: string; to: string; wan: boolean }>();
+    if (view.showLinks) {
+      for (const v of state.views) {
+        if (!v.reachable || !nodeNames.has(v.id)) continue;
+        for (const [peer, entry] of Object.entries(v.view)) {
+          if (entry.status !== "alive" || (!nodeNames.has(peer) && !remoteIds.has(peer))) continue;
+          const to = glyphFor(peer);
+          const key = v.id < to ? `${v.id} ${to}` : `${to} ${v.id}`;
+          if (!edgeMap.has(key)) edgeMap.set(key, { from: v.id, to, wan: remoteIds.has(peer) });
+        }
+      }
+    }
+    const edges = [...edgeMap.values()];
+
+    // ---------- beliefs ----------
+    // Colour is mesh consensus for local and remote nodes alike (consensus()
+    // walks the local views, which hold remote entries too).
+    const beliefs = new Map<string, NodeStatus | "unknown">();
+    for (const p of nodes) beliefs.set(p.name, consensus(state, p.name));
+    for (const m of remotes) beliefs.set(m.id, consensus(state, m.id));
+
+    return { lighthouses, nodes, remotes, remoteDevices, extraLh, glyphFor, defaults, cx, cy, colX, glyphNames, byService, edges, beliefs };
+    // consensus() reads state.views only; the other reads are the slices listed.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [state.procs, state.remotes, state.extraLighthouses, state.views, view.collapse, view.showLinks]);
+  const { lighthouses, nodes, remotes, remoteDevices, extraLh, glyphFor, defaults, cx, cy, colX, glyphNames, byService, edges, beliefs } = derived;
 
   const getPos = (name: string): XY => pos[name] ?? defaults.get(name) ?? { x: cx, y: cy };
 
   // ---------- routers (visual overlay) ----------
-  const glyphNames = new Set([
-    ...state.procs.map((p) => p.name),
-    ...(view.collapse ? remoteDevices.map((d) => devId(d.device)) : remotes.map((m) => m.id)),
-  ]);
-  // Default router links name services ("aegis"); a fleet joined to other
-  // machines runs as "aegis-<device>", so resolve link endpoints by service too.
-  const byService = new Map<string, string>();
-  for (const p of nodes) if (p.service && !byService.has(p.service)) byService.set(p.service, p.name);
   const resolveEnd = (n: string) => (glyphNames.has(n) ? n : byService.get(n) ?? (glyphNames.has(glyphFor(n)) ? glyphFor(n) : undefined));
   const routers = links
     .map(([a, b]) => [resolveEnd(a), resolveEnd(b)] as [string | undefined, string | undefined])
@@ -256,35 +294,15 @@ export function TopologyGraph({
     } as React.CSSProperties,
   });
 
-  // ---------- gossip web ----------
-  // An edge from each reachable observer to every peer it believes alive,
-  // deduped by unordered pair so A↔B is drawn once. In collapsed view every
-  // edge to a remote node lands on its device card (and is deduped there too).
-  const nodeNames = new Set(nodes.map((p) => p.name));
-  const edgeMap = new Map<string, { from: string; to: string; wan: boolean }>();
-  if (view.showLinks) {
-    for (const v of state.views) {
-      if (!v.reachable || !nodeNames.has(v.id)) continue;
-      for (const [peer, entry] of Object.entries(v.view)) {
-        if (entry.status !== "alive" || (!nodeNames.has(peer) && !remoteIds.has(peer))) continue;
-        const to = glyphFor(peer);
-        const key = v.id < to ? `${v.id} ${to}` : `${to} ${v.id}`;
-        if (!edgeMap.has(key)) edgeMap.set(key, { from: v.id, to, wan: remoteIds.has(peer) });
-      }
-    }
-  }
-  const edges = [...edgeMap.values()];
-
   if (!state.procs.length && !remotes.length) {
     return <div className="empty">No processes yet — boot the demo mesh or add servers.</div>;
   }
 
   // ---------- glyphs ----------
-  // One renderer for local and remote nodes: colour is mesh consensus in both
-  // cases (consensus() walks the local views, which hold remote entries too).
+  // One renderer for local and remote nodes; colour is the memoised belief.
   const nodeGlyph = (id: string, service: string | undefined, running: boolean, remote?: RemoteMember) => {
     const at = getPos(id);
-    const belief = consensus(state, id);
+    const belief = beliefs.get(id) ?? "unknown";
     const isPrimary = activeThreat?.primary === id;
     const fallbackRank = activeThreat ? activeThreat.fallbacks.indexOf(id) : -1;
     const sys = systemOf(id, service);

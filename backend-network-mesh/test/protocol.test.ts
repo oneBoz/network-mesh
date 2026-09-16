@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { FRAME_OVERHEAD, MAX_DATAGRAM, decodeWith, deriveKey, encodeWith } from "../src/protocol.js";
+import { FRAME_OVERHEAD, MAX_DATAGRAM, decodeWith, deriveKey, encodeWith, wireSizeWith } from "../src/protocol.js";
 import type { Message } from "../src/protocol.js";
 
 const KEY = deriveKey("test-secret-a")!;
@@ -67,6 +67,14 @@ test("mixed configurations are rejected loudly, plaintext meshes still work", ()
   const oldHmac = Buffer.from("ab12cd\n1700000000000\n{\"type\":\"ping\"}"); // the pre-encryption frame shape
   assert.equal(decodeWith(oldHmac, KEY, d.on), null);
   assert.match(d.r[0], /older build/);
+});
+
+test("wireSizeWith predicts the encoded length exactly, encrypted and plaintext", () => {
+  const multibyte = { type: "ping", pad: "é✱".repeat(150) } as unknown as Message; // byte length ≠ string length
+  for (const m of [msg, multibyte]) {
+    assert.equal(wireSizeWith(m, KEY), encodeWith(m, KEY).length);
+    assert.equal(wireSizeWith(m, null), encodeWith(m, null).length);
+  }
 });
 
 test("a maximum-size datagram still fits after encryption", () => {

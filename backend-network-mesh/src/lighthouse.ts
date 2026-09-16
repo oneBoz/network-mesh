@@ -13,7 +13,8 @@
  *   npx tsx src/lighthouse.ts --port 5001 [--http 9001]
  *
  * --http starts a loopback-only HTTP API for dashboards on the same machine:
- *   GET /registry  → who is registered (observed address, device, last seen, incarnation)
+ *   GET /registry  → who is registered (observed address, device, lastSeen, incarnation);
+ *                    only timestamps, no ages, so an idle registry reads the same every second
  *   GET /health    → { ok, port, signing, registered, rejected, uptimeMs }
  */
 import { createSocket } from "node:dgram";
@@ -129,10 +130,11 @@ sock.on("message", (buf, rinfo) => {
   }
 });
 
+/** Uniform random n-subset (partial Fisher-Yates: only n draws). */
 function sample<T>(arr: T[], n: number): T[] {
   if (arr.length <= n) return arr;
-  for (let i = arr.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
+  for (let i = 0; i < n; i++) {
+    const j = i + Math.floor(Math.random() * (arr.length - i));
     [arr[i], arr[j]] = [arr[j], arr[i]];
   }
   return arr.slice(0, n);
@@ -160,9 +162,9 @@ if (HTTP_PORT) {
       const entries = [...registry.values()].map((r) => ({
         id: r.info.id, device: r.info.device, service: r.info.service,
         host: r.info.host, port: r.info.port, httpPort: r.info.httpPort,
-        advertise: r.info.advertise, inc: r.inc, lastSeen: r.lastSeen, ageMs: now - r.lastSeen,
+        advertise: r.info.advertise, inc: r.inc, lastSeen: r.lastSeen,
       })).sort((a, b) => a.id.localeCompare(b.id));
-      res.end(JSON.stringify({ port: PORT, signing: !!process.env.MESH_KEY, registered: entries.length, rejected, joins, uptimeMs: now - STARTED, staleMs: STALE_MS, entries }));
+      res.end(JSON.stringify({ port: PORT, signing: !!process.env.MESH_KEY, registered: entries.length, rejected, joins, startedAt: STARTED, staleMs: STALE_MS, entries }));
     } else if (req.url === "/health") {
       res.end(JSON.stringify({ ok: true, port: PORT, signing: !!process.env.MESH_KEY, registered: registry.size, rejected, joins, uptimeMs: now - STARTED }));
     } else {

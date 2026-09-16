@@ -123,11 +123,12 @@ export const MAX_DATAGRAM = 1_350;
 
 /** Drop items from `items` (from the front, or from the back when `fromBack`)
  *  until the message `build` makes from them encodes under MAX_DATAGRAM. Always
- *  keeps at least `min` items. */
+ *  keeps at least `min` items. Sizes each attempt with wireSize() — one
+ *  stringify — rather than encrypting a packet just to measure it. */
 export function trimToFit<T>(items: T[], build: (items: T[]) => Message, opts: { min?: number; fromBack?: boolean } = {}): T[] {
   const min = opts.min ?? 0;
   const arr = items.slice();
-  while (arr.length > min && encode(build(arr)).length > MAX_DATAGRAM) {
+  while (arr.length > min && wireSize(build(arr)) > MAX_DATAGRAM) {
     if (opts.fromBack) arr.pop(); else arr.shift();
   }
   return arr;
@@ -148,6 +149,18 @@ export function deriveKey(secret: string): Buffer | null {
 const KEY = deriveKey(process.env.MESH_KEY ?? "");
 /** True when this process encrypts (MESH_KEY set). */
 export const ENCRYPTED = KEY !== null;
+const TIMESTAMP_LINE = 14; // `${Date.now()}\n` inside the frame: 13 digits until the year 2286
+
+/** Exact size of `msg` on the wire, computed without encrypting it: the JSON
+ *  bytes, plus on an encrypted mesh the frame overhead and the timestamp line.
+ *  What trimToFit uses to fit a packet under MAX_DATAGRAM. */
+export function wireSizeWith(msg: Message, key: Buffer | null): number {
+  const json = Buffer.byteLength(JSON.stringify(msg));
+  return key ? json + FRAME_OVERHEAD + TIMESTAMP_LINE : json;
+}
+export function wireSize(msg: Message): number {
+  return wireSizeWith(msg, KEY);
+}
 
 export function encodeWith(msg: Message, key: Buffer | null, now = Date.now()): Buffer {
   const body = JSON.stringify(msg);

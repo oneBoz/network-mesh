@@ -4,13 +4,17 @@
  * Node built-ins only, like the rest of the project. Three jobs:
  *   1. Process manager — spawn/crash/revive lighthouses and nodes on request
  *      (each is a real child process running the untouched src/ code).
- *   2. Poller — every second, ask each node's /members API for its view and
- *      merge the answers into one MeshState snapshot.
- *   3. Push — stream snapshots + process logs to the frontend over SSE.
+ *   2. Poller — every second, ask each node's /members, /inbox and /tracks
+ *      APIs (and each lighthouse's /registry) and merge the answers into one
+ *      MeshState snapshot.
+ *   3. Push — stream state changes + process logs to the frontend over SSE. A
+ *      client gets the full snapshot when it connects, then only the slices
+ *      that changed since the last push — and nothing while the mesh is idle.
  *
  * REST API (all JSON):
  *   GET    /api/state                  current MeshState
- *   GET    /api/events                 SSE stream: `state` + `log` events
+ *   GET    /api/events                 SSE stream: `state` (full, then patches of changed slices),
+ *                                      `log`, `message`, `threat`, `geo` events
  *   POST   /api/demo                   boot 3 lighthouses + 5 defense-system nodes
  *   POST   /api/stop-all               crash everything (specs kept for revive)
  *   POST   /api/quit                   stop everything AND exit the backend
@@ -44,6 +48,8 @@
  * development the Vite dev server proxies /api here instead.
  *
  * Usage: npx tsx backend/src/server.ts [--port 7070]
+ *    or: npm run build && node dist/backend/src/server.js   (what Docker runs: no loader,
+ *        and the children are spawned as plain `node dist/src/<entry>.js` too)
  */
 import { createSocket } from "node:dgram";
 import { createServer } from "node:http";
@@ -82,13 +88,17 @@ const sseClients = new Set<ServerResponse>();
 const MAX_LOG_HISTORY = 300;
 const logHistory: LogEvent[] = [];
 
+function broadcastRaw(event: string, dataJson: string): void {
+  const frame = `event: ${event}\ndata: ${dataJson}\n\n`;
+  for (const res of sseClients) res.write(frame);
+}
+
 function broadcast(event: string, data: unknown): void {
   if (event === "log") {
     logHistory.push(data as LogEvent);
     if (logHistory.length > MAX_LOG_HISTORY) logHistory.splice(0, logHistory.length - MAX_LOG_HISTORY);
   }
-  const frame = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
-  for (const res of sseClients) res.write(frame);
+  broadcastRaw(event, JSON.stringify(data));
 }
 
 const procman = new ProcManager((source, line) => {
@@ -184,8 +194,8 @@ async function pollInbox(node: string, httpPort: number): Promise<void> {
     for (const m of body.messages) {
       inboxCursor.set(node, Math.max(inboxCursor.get(node) ?? 0, m.receivedAt));
       const existing = messageIndex.get(m.id);
+      const housekeeping = m.kind === "geo.locations" || m.kind === "geo.locations.request";
       if (!existing) {
-        const housekeeping = m.kind === "geo.locations" || m.kind === "geo.locations.request";
         if (housekeeping) {
           messageIndex.set(m.id, { id: m.id, at: m.at, kind: m.kind, from: m.from, body: {}, receivedAt: m.receivedAt, seenBy: [node], agree: 1, consistent: true });
           if (m.kind === "geo.locations" && geo.adopt((m.body as { table?: unknown }).table)) {
@@ -211,7 +221,7 @@ async function pollInbox(node: string, httpPort: number): Promise<void> {
             ts: Date.now(),
           } satisfies LogEvent);
         }
-      } else if (!existing.seenBy.includes(node)) {
+      } else if (!housekeeping && !existing.seenBy.includes(node)) {
         existing.seenBy.push(node);
         // Every node should have decided the same thing — the "one entity" check.
         // A node whose view had not converged at that instant answers differently.
@@ -220,6 +230,7 @@ async function pollInbox(node: string, httpPort: number): Promise<void> {
             && m.assignment.fallbacks.join() === existing.assignment.fallbacks.join());
         if (same) existing.agree++;
         existing.consistent = existing.agree === existing.seenBy.length;
+        broadcast("message", existing); // agreement changed — messages travel as their own events, never in state patches
       }
     }
   } catch {
@@ -295,25 +306,62 @@ async function pollNode(id: string, httpPort: number): Promise<NodeView> {
 async function poll(): Promise<void> {
   const procs = procman.list();
   const nodes = procs.filter((p) => p.kind === "node");
-  const views = await Promise.all(
-    nodes.map((n) =>
+  const live = nodes.filter((n) => n.running && n.httpPort);
+  // The four fetch rounds are independent: run them together, so a poll costs
+  // one round-trip (and a stalled node one timeout) instead of four in a row.
+  const [views, , lighthouses, tracks] = await Promise.all([
+    Promise.all(nodes.map((n) =>
       n.running && n.httpPort
         ? pollNode(n.name, n.httpPort)
         : Promise.resolve<NodeView>({ id: n.name, reachable: false, inc: 0, service: n.service, view: {} })
-    )
-  );
-  await Promise.all(nodes.filter((n) => n.running && n.httpPort).map((n) => pollInbox(n.name, n.httpPort!)));
-  const lighthouses = await Promise.all(procs.filter((p) => p.kind === "lighthouse").map(pollLighthouse));
-  const tracks = await pollTracks(nodes.filter((n) => n.running && n.httpPort));
+    )),
+    Promise.all(live.map((n) => pollInbox(n.name, n.httpPort!))),
+    Promise.all(procs.filter((p) => p.kind === "lighthouse").map(pollLighthouse)),
+    pollTracks(live),
+  ]);
   lastState = {
     ts: Date.now(), device: DEVICE, procs, views, threats: recentThreats,
     remotes: deriveRemotes(procs, views), extraLighthouses: procman.extraLighthouses(), messages, geo: geo.get(),
     lighthouses, tracks, sims: sim.list(),
   };
-  broadcast("state", lastState);
+  publishState();
 }
 
-setInterval(poll, POLL_MS);
+// Re-armed after each round completes rather than setInterval: a round that
+// waits out its timeouts must not overlap the next one or publish out of order.
+function schedulePoll(): void {
+  setTimeout(() => void poll().catch(() => undefined).finally(schedulePoll), POLL_MS);
+}
+schedulePoll();
+
+// ---------- state push: only what changed ----------
+// Each slice of MeshState is fingerprinted by its JSON. A `state` event carries
+// just the slices whose fingerprint moved (plus `ts`) — and is not sent at all
+// while nothing moves. A client merges patches over the full snapshot it got on
+// connect, so an untouched slice keeps its identity in the browser and the
+// panels that read it can skip their work. `messages` never rides along: each
+// message is pushed as its own `message` event (see pollInbox).
+const STATE_SLICES = ["device", "procs", "views", "threats", "remotes", "extraLighthouses", "geo", "lighthouses", "tracks", "sims"] as const satisfies readonly (keyof MeshState)[];
+const sentSlice = new Map<string, string>(); // slice → JSON as last pushed
+
+function publishState(): void {
+  if (!sseClients.size) return; // nobody listening: skip the fingerprinting too
+  const parts: string[] = [];
+  for (const k of STATE_SLICES) {
+    const json = JSON.stringify(lastState[k]);
+    if (sentSlice.get(k) === json) continue;
+    sentSlice.set(k, json);
+    parts.push(`"${k}":${json}`);
+  }
+  if (!parts.length) return;
+  broadcastRaw("state", `{"ts":${lastState.ts},${parts.join(",")}}`);
+}
+
+/** The full snapshot for a client that just connected; every later `state` event is a patch relative to it. */
+function stateSnapshotFrame(): string {
+  for (const k of STATE_SLICES) sentSlice.set(k, JSON.stringify(lastState[k]));
+  return `event: state\ndata: ${JSON.stringify(lastState)}\n\n`;
+}
 
 // ---------- port / name allocation ----------
 // Windows reserves whole port ranges (Hyper-V/WinNAT exclusions), so a port
@@ -409,7 +457,7 @@ async function pollTracks(nodes: ProcState[]): Promise<TrackView[]> {
 }
 
 async function pollLighthouse(p: ProcState): Promise<LighthouseView> {
-  const base: LighthouseView = { name: p.name, port: p.port, reachable: false, signing: false, registered: 0, rejected: 0, joins: 0, uptimeMs: 0, staleMs: 0, entries: [] };
+  const base: LighthouseView = { name: p.name, port: p.port, reachable: false, signing: false, registered: 0, rejected: 0, joins: 0, startedAt: 0, staleMs: 0, entries: [] };
   if (!p.running || !p.httpPort) return base;
   try {
     const r = await nodeFetch(`http://127.0.0.1:${p.httpPort}/registry`, { signal: AbortSignal.timeout(POLL_TIMEOUT_MS) });
@@ -479,7 +527,13 @@ async function serveStatic(res: ServerResponse, urlPath: string): Promise<boolea
   const file = join(DIST, rel);
   try {
     if (!(await stat(file)).isFile()) return false;
-    res.writeHead(200, { "content-type": MIME[extname(file)] ?? "application/octet-stream" });
+    // Vite content-hashes everything under assets/, so a browser may keep those
+    // forever; index.html must be revalidated so a new build is picked up.
+    const hashed = rel.split(/[\\/]/)[0] === "assets";
+    res.writeHead(200, {
+      "content-type": MIME[extname(file)] ?? "application/octet-stream",
+      "cache-control": hashed ? "public, max-age=31536000, immutable" : "no-cache",
+    });
     res.end(await readFile(file));
     return true;
   } catch {
@@ -505,7 +559,7 @@ const server = createServer(async (req, res) => {
         connection: "keep-alive",
       });
       for (const e of logHistory) res.write(`event: log\ndata: ${JSON.stringify(e)}\n\n`);
-      res.write(`event: state\ndata: ${JSON.stringify(lastState)}\n\n`);
+      res.write(stateSnapshotFrame());
       sseClients.add(res);
       const heartbeat = setInterval(() => res.write(": ping\n\n"), 15_000);
       req.on("close", () => {

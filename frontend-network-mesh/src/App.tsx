@@ -15,8 +15,18 @@ import { TimelinePanel } from "./Engagement";
 import { groupRemotes } from "./remotes";
 
 const MAX_LOG = 300;
+const MAX_MESSAGES = 100; // mirrors the control plane's cap
 const THREAT_HIGHLIGHT_MS = 12_000; // engagement rings fade after this
 const MODE_KEY = "mesh-mode";
+let logSeq = 0; // stable keys for log rows: the list is a sliding window, so an index would shift every flush
+
+/** Messages arrive as their own SSE events — once when first seen and again when
+ *  more local nodes report them — and never inside a `state` patch. */
+function upsertMessage(list: InboxMessage[], m: InboxMessage): InboxMessage[] {
+  const i = list.findIndex((x) => x.id === m.id);
+  if (i >= 0) { const next = list.slice(); next[i] = m; return next; }
+  return [...list, m].slice(-MAX_MESSAGES);
+}
 
 /** Two operator modes on the same control plane:
  *  - command: the full picture (topology, convergence, fleet, log) plus the
@@ -87,11 +97,13 @@ export function App() {
       threatTimer.current = setTimeout(() => setActiveThreat(null), THREAT_HIGHLIGHT_MS);
     };
     const unsubscribe = subscribe(
-      (s) => setState(s),
-      (e) => buffer.push(e),
+      // Full snapshot on connect, then patches: slices absent from a patch keep their identity.
+      (patch) => setState((prev) => ({ ...prev, ...patch })),
+      (e) => buffer.push({ ...e, id: ++logSeq }),
       (up) => setConnected(up),
       highlight,
       (m) => {
+        setState((prev) => ({ ...prev, messages: upsertMessage(prev.messages, m) }));
         const t = signalToThreat(m);
         if (t) highlight(t);
         // A neutralised (or lost) target stops glowing on the topology.
@@ -110,7 +122,7 @@ export function App() {
   }, []);
 
   const onError = (m: string) =>
-    setEvents((prev) => [...prev, { source: "backend", line: `error: ${m}`, ts: Date.now() }].slice(-MAX_LOG));
+    setEvents((prev) => [...prev, { id: ++logSeq, source: "backend", line: `error: ${m}`, ts: Date.now() }].slice(-MAX_LOG));
 
   const nodes = state.procs.filter((p) => p.kind === "node");
   const liveNodes = nodes.filter((p) => p.running).length;
