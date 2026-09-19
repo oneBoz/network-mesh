@@ -35,3 +35,13 @@ export function groupRemotes(remotes: RemoteMember[]): RemoteDevice[] {
 export function hostOfNode(state: MeshState, nodeId: string): string | undefined {
   return state.remotes.find((r) => r.id === nodeId)?.host;
 }
+
+/** Worst-of belief for a whole device: dead only if every member is dead, suspect if any is,
+ *  alive if any is, unknown otherwise. Shared by the topology card, the fleet list and the map. */
+export function deviceStatus(d: RemoteDevice): "alive" | "suspect" | "dead" | "unknown" {
+  const s = d.members.map((m) => m.status);
+  if (s.length && s.every((x) => x === "dead")) return "dead";
+  if (s.some((x) => x === "suspect")) return "suspect";
+  if (s.some((x) => x === "alive")) return "alive";
+  return "unknown";
+}

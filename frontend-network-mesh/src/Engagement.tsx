@@ -2,45 +2,52 @@ import { useState } from "react";
 import { api } from "./api";
 import type { MeshState, TrackView } from "./types";
 import { systemLabel } from "./defense";
-import { fmtTime } from "./SignalsPanel";
+import { PanelHead, Pill, cap, fmtTime } from "./ui";
+import type { Tone } from "./ui";
 
 export const trackFor = (state: MeshState, id: string): TrackView | undefined => state.tracks.find((t) => t.trackId === id);
 export const isLiveTrack = (t: TrackView) => t.state === "detected" || t.state === "engaging";
 
-/** One-word state with colour, plus who is responsible now. */
+const STATE_PILL: Record<TrackView["state"], { tone: Tone; label: string }> = {
+  detected: { tone: "warn", label: "awaiting engagement" },
+  engaging: { tone: "info", label: "engaging" },
+  neutralised: { tone: "ok", label: "✔ neutralised" },
+  lost: { tone: "neutral", label: "lost" },
+  impact: { tone: "bad", label: "✖ impact · leaked" },
+};
+
+/** Lifecycle state and who is responsible, as inline items for a `.lifecycle` row. */
 export function TrackBadge({ t, state }: { t: TrackView; state: MeshState }) {
-  const cls = t.state === "neutralised" ? "tb-done" : t.state === "lost" ? "tb-lost" : t.state === "impact" ? "tb-impact" : t.state === "engaging" ? "tb-engaging" : "tb-detected";
   const mine = !!t.responsibleDevice && t.responsibleDevice === state.device;
+  const p = STATE_PILL[t.state];
   return (
-    <span className="track-badge-row">
-      <span className={`track-badge ${cls}`}>
-        {t.state === "neutralised" ? "✔ neutralised" : t.state === "lost" ? "lost" : t.state === "impact" ? "✖ IMPACT — leaked" : t.state === "engaging" ? "engaging" : "awaiting engagement"}
-      </span>
+    <>
+      <Pill tone={p.tone}>{p.label}</Pill>
       {isLiveTrack(t) && (
         t.responsibleNode
-          ? <span className="muted">responsible: <b style={{ color: mine ? "var(--accent)" : "var(--text)" }}>{t.responsibleDevice ?? "?"}</b> ({systemLabel(t.responsibleNode)}){mine && <span className="mine-tag">you</span>}</span>
-          : <span className="threat-leaked">nobody left in the chain — LEAKED</span>
+          ? <span className="reason">responsible <b style={{ color: mine ? "var(--accent)" : "var(--text)" }}>{t.responsibleDevice ?? "?"}</b> ({systemLabel(t.responsibleNode)}){mine && <> <Pill tone="info">you</Pill></>}</span>
+          : <span className="threat-leaked">nobody left in the chain — leaked</span>
       )}
       {t.state === "neutralised" && t.neutralised && (
-        <span className="muted">by <b style={{ color: "var(--text)" }}>{t.neutralised.station ?? t.neutralised.device ?? t.neutralised.node}</b> at {fmtTime(t.neutralised.at)}{t.neutralised.override && <span className="agree-tag bad" style={{ marginLeft: 6 }}>Command override</span>}</span>
+        <span className="reason">by <b style={{ color: "var(--text)" }}>{t.neutralised.station ?? t.neutralised.device ?? t.neutralised.node}</b> at {fmtTime(t.neutralised.at)}{t.neutralised.override && <> <Pill tone="bad">Command override</Pill></>}</span>
       )}
       {t.escalations.length > 0 && (
-        <span className="muted" title={t.escalations.map((e) => `${fmtTime(e.at)} ${e.reason}: ${e.from ?? "nobody"} → ${e.to ?? "NOBODY"}${e.note ? ` (${e.note})` : ""}`).join("\n")}>
-          · escalated ×{t.escalations.length} ({t.escalations.at(-1)!.reason})
+        <span className="reason" title={t.escalations.map((e) => `${fmtTime(e.at)} ${e.reason}: ${e.from ?? "nobody"} → ${e.to ?? "NOBODY"}${e.note ? ` (${e.note})` : ""}`).join("\n")}>
+          escalated ×{t.escalations.length} ({t.escalations.at(-1)!.reason})
         </span>
       )}
       {t.rejected.length > 0 && (
-        <span className="lh-bad" title={t.rejected.map((r) => `${fmtTime(r.at)} ${r.action} by ${r.device ?? r.node}: ${r.reason}`).join("\n")}>
-          · {t.rejected.length} rejected attempt{t.rejected.length === 1 ? "" : "s"}
+        <span className="reason" style={{ color: "var(--dead)" }} title={t.rejected.map((r) => `${fmtTime(r.at)} ${r.action} by ${r.device ?? r.node}: ${r.reason}`).join("\n")}>
+          {t.rejected.length} rejected attempt{t.rejected.length === 1 ? "" : "s"}
         </span>
       )}
-      <span className={`agree-tag${t.consistent ? "" : " bad"}`} title={`local nodes agreeing on state + responsible: ${t.seenBy.join(", ")}`}>{t.agree}/{t.seenBy.length}</span>
-    </span>
+      <Pill tone={t.consistent ? "ok" : "bad"} title={`local nodes agreeing on state + responsible: ${t.seenBy.join(", ")}`}>{t.agree}/{t.seenBy.length} agree</Pill>
+    </>
   );
 }
 
-/** NEUTRALISED / hand over controls — enabled only while this device is responsible
- *  (the mesh would reject anything else; Command may override). */
+/** Engage / Neutralised / Hand over — enabled only while this device is responsible
+ *  (the mesh would reject anything else; Command may override, which is logged). */
 export function TrackControls({ t, state, station, command, onError }: {
   t: TrackView; state: MeshState; station?: string; command?: boolean; onError: (m: string) => void;
 }) {
@@ -52,51 +59,49 @@ export function TrackControls({ t, state, station, command, onError }: {
     try { await api.trackAction(t.trackId, action, { station, ...opts }); } catch (e) { onError((e as Error).message); } finally { setBusy(null); }
   };
   return (
-    <span className="track-controls">
-      {mine && t.state === "detected" && (
-        <button className="primary" disabled={!!busy} onClick={() => run("engaging")}>ENGAGE</button>
-      )}
-      {mine && (
-        <button className="neutralise" disabled={!!busy} onClick={() => run("neutralise")}>✔ NEUTRALISED</button>
-      )}
-      {mine && (
-        <button disabled={!!busy} title="pass responsibility to the next fallback" onClick={() => run("handover", { note: "handed over by operator" })}>hand over</button>
-      )}
+    <span className="controls">
+      {mine && t.state === "detected" && <button type="button" className="btn sm primary" disabled={!!busy} onClick={() => run("engaging")}>Engage</button>}
+      {mine && <button type="button" className="btn sm confirm" disabled={!!busy} onClick={() => run("neutralise")}>Neutralised</button>}
+      {mine && <button type="button" className="btn sm quiet" disabled={!!busy} title="pass responsibility to the next fallback" onClick={() => run("handover", { note: "handed over by operator" })}>Hand over</button>}
       {!mine && command && (
-        <button className="danger" disabled={!!busy} title="Command override: neutralise although this device is not responsible (logged)"
-          onClick={() => run("neutralise", { override: true })}>override: neutralised</button>
+        <button type="button" className="btn sm destructive" disabled={!!busy} title="Command override: neutralise although this device is not responsible (logged)"
+          onClick={() => run("neutralise", { override: true })}>Override: neutralised</button>
       )}
-      {!mine && !command && <span className="muted" style={{ fontSize: 12 }}>waiting on {t.responsibleDevice ?? "?"}</span>}
+      {!mine && !command && <span className="reason">waiting on {t.responsibleDevice ?? "?"}</span>}
     </span>
   );
 }
 
+const THREAT_WORD = (t: TrackView) => cap(t.threat);
+
 /** Command-mode timeline: every lifecycle event across all tracks, newest first. */
 export function TimelinePanel({ state }: { state: MeshState }) {
-  const events: { at: number; text: string; cls?: string }[] = [];
+  const events: { at: number; text: React.ReactNode; tone: Tone }[] = [];
+  const assetLabel = (id?: string) => (id ? state.geo.entries[id]?.label ?? id : "target");
   for (const t of state.tracks) {
     const who = t.origin.station ?? t.origin.node;
-    events.push({ at: t.detectedAt, text: `${t.threat.toUpperCase()} detected by ${who}@${t.origin.device ?? "?"} → ${t.chain[0] ? systemLabel(t.chain[0]) : "no coverage"}`, cls: "log-good" });
-    for (const e of t.escalations) events.push({ at: e.at, text: `${t.threat.toUpperCase()} escalated (${e.reason}${e.note ? `: ${e.note}` : ""}): ${e.from ? systemLabel(e.from) : "nobody"} → ${e.to ? systemLabel(e.to) : "NOBODY LEFT"}`, cls: "log-warn" });
-    for (const r of t.rejected) events.push({ at: r.at, text: `${t.threat.toUpperCase()} ${r.action} by ${r.device ?? r.node} REJECTED — ${r.reason}`, cls: "log-bad" });
-    if (t.engagingAt) events.push({ at: t.engagingAt, text: `${t.threat.toUpperCase()} engaging — ${t.responsibleDevice ?? t.responsibleNode ?? "?"} acknowledged` });
-    if (t.neutralised) events.push({ at: t.neutralised.at, text: `${t.threat.toUpperCase()} NEUTRALISED by ${t.neutralised.station ?? t.neutralised.device ?? t.neutralised.node}${t.neutralised.override ? " (Command override)" : ""}`, cls: "log-good" });
-    if (t.lostAt) events.push({ at: t.lostAt, text: `${t.threat.toUpperCase()} lost — updates stopped`, cls: "log-warn" });
-    if (t.impactAt) events.push({ at: t.impactAt, text: `${t.threat.toUpperCase()} IMPACT on ${t.target ?? "target"} — the defence leaked`, cls: "log-bad" });
+    const T = THREAT_WORD(t);
+    events.push({ at: t.detectedAt, tone: "info", text: <><b>{T}</b> detected by {who}@{t.origin.device ?? "?"} → {t.chain[0] ? systemLabel(t.chain[0]) : "no coverage"}</> });
+    for (const e of t.escalations) events.push({ at: e.at, tone: "warn", text: <><b>{T}</b> escalated on {e.reason}{e.note ? ` (${e.note})` : ""} · {e.from ? systemLabel(e.from) : "nobody"} → {e.to ? systemLabel(e.to) : "nobody left"}</> });
+    for (const r of t.rejected) events.push({ at: r.at, tone: "bad", text: <><b>{T}</b> {r.action} by {r.device ?? r.node} rejected · {r.reason}</> });
+    if (t.engagingAt) events.push({ at: t.engagingAt, tone: "info", text: <><b>{T}</b> engaging · {t.responsibleDevice ?? t.responsibleNode ?? "?"} acknowledged</> });
+    if (t.neutralised) events.push({ at: t.neutralised.at, tone: "ok", text: <><b>{T}</b> neutralised by {t.neutralised.station ?? t.neutralised.device ?? t.neutralised.node}{t.neutralised.override ? " (Command override)" : ""}</> });
+    if (t.lostAt) events.push({ at: t.lostAt, tone: "neutral", text: <><b>{T}</b> lost · updates stopped</> });
+    if (t.impactAt) events.push({ at: t.impactAt, tone: "bad", text: <><b>{T}</b> impact on {assetLabel(t.target)} · the defence leaked</> });
   }
   events.sort((a, b) => b.at - a.at);
   const live = state.tracks.filter(isLiveTrack).length;
   return (
     <div className="panel">
-      <h2>Engagement timeline <span className="muted" style={{ fontWeight: 400, textTransform: "none", letterSpacing: 0 }}>· {live} live, {state.tracks.length} total</span></h2>
+      <PanelHead title="Engagement timeline" sub={`${live} live · ${state.tracks.length} total`} />
       {events.length ? (
-        <div className="log" style={{ height: 200 }}>
-          {events.slice(0, 60).map((e, i) => (
-            <div key={i} className={e.cls}><span className="src" style={{ color: "var(--muted)" }}>{fmtTime(e.at)}</span><span>{e.text}</span></div>
+        <div className="timeline">
+          {events.slice(0, 80).map((e, i) => (
+            <div key={i} className="ev"><span className="t">{fmtTime(e.at)}</span><span className={`k ${e.tone}`} aria-hidden="true" /><span className="x">{e.text}</span></div>
           ))}
         </div>
       ) : (
-        <div className="muted" style={{ fontSize: 12 }}>No targets yet. A GCS signal creates a track; its responsible GCS engages and neutralises it, or the mesh escalates down the fallback chain.</div>
+        <p className="empty">No targets yet. A GCS signal creates a track; its responsible GCS engages and neutralises it, or the mesh escalates down the fallback chain.</p>
       )}
     </div>
   );

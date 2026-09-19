@@ -2,17 +2,18 @@ import { useEffect, useRef, useState } from "react";
 import L from "leaflet";
 import "leaflet/dist/leaflet.css";
 import type { GeoEntry, MeshState, NodeStatus, TrackView } from "./types";
-import { groupRemotes } from "./remotes";
+import { deviceStatus, groupRemotes } from "./remotes";
 import { api } from "./api";
+import { Field, Pill, StatusGlyph } from "./ui";
 
 const SINGAPORE: L.LatLngTuple = [1.3521, 103.8198];
 const TILES = "https://tile.openstreetmap.org/{z}/{x}/{y}.png";
 const ATTRIB = '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors';
 
 const STATUS_COLOR: Record<NodeStatus | "unknown" | "asset", string> = {
-  alive: "#2dd4a7", suspect: "#f5b841", dead: "#e5484d", unknown: "#3a4a68", asset: "#8b7cf6",
+  alive: "#3dd9a4", suspect: "#f2b33d", dead: "#f47174", unknown: "#9aa7bd", asset: "#afa3fb",
 };
-const THREAT_COLOR: Record<string, string> = { missile: "#ff6b6b", swarm: "#f5b841", aircraft: "#5eead4", emp: "#c4b5fd" };
+const THREAT_COLOR: Record<string, string> = { missile: "#ee86cb", swarm: "#f2b33d", aircraft: "#7dd3fc", emp: "#c4b5fd" };
 const THREAT_GLYPH: Record<string, string> = { missile: "▲", swarm: "✱", aircraft: "✈", emp: "⚡" };
 const RECENT_MS = 90_000; // finished tracks stay on the map this long
 const BASEMAP_KEY = "mesh-map-basemap";
@@ -44,10 +45,7 @@ function placeables(state: MeshState): Placeable[] {
     });
   }
   for (const d of groupRemotes(state.remotes)) {
-    const statuses = d.members.map((m) => m.status);
-    const status: NodeStatus | "unknown" = statuses.every((s) => s === "dead") ? "dead"
-      : statuses.some((s) => s === "suspect") ? "suspect" : statuses.some((s) => s === "alive") ? "alive" : "unknown";
-    out.push({ id: d.device, kind: "device", label: d.device, status, sub: `${d.host} · ${d.alive}/${d.members.length} alive`, placed: state.geo.entries[d.device] });
+    out.push({ id: d.device, kind: "device", label: d.device, status: deviceStatus(d), sub: `${d.host} · ${d.alive}/${d.members.length} alive`, placed: state.geo.entries[d.device] });
   }
   for (const [id, e] of Object.entries(state.geo.entries)) {
     if (e.kind === "asset") out.push({ id, kind: "asset", label: e.label ?? id, status: "asset", sub: "defended asset", placed: e });
@@ -59,21 +57,24 @@ function icon(p: Placeable, selected: boolean): L.DivIcon {
   const color = STATUS_COLOR[p.status];
   const shape = p.kind === "asset"
     ? `<div class="map-pin asset${selected ? " sel" : ""}" style="--c:${color}"><span>◆</span></div>`
-    : `<div class="map-pin device${selected ? " sel" : ""}" style="--c:${color}"><span>${p.label.slice(0, 2).toUpperCase()}</span></div>`;
+    : `<div class="map-pin device${p.status === "dead" ? " down" : ""}${selected ? " sel" : ""}" style="--c:${color}"><span>${p.status === "dead" ? "" : p.label.slice(0, 2).toUpperCase()}</span></div>`;
   return L.divIcon({ className: "", html: `${shape}<div class="map-label">${p.label}</div>`, iconSize: [28, 28], iconAnchor: [14, 14] });
 }
 
 /**
  * Map of Singapore with every device and defended asset from the location
  * table. In Command mode ("editable") the operator places things: pick an
- * item in the side list (or type a new asset name), click the map; drag a
- * marker to move it; × removes an asset. Every edit goes to PUT /api/geo/<id>,
- * which persists it and broadcasts the table to the whole mesh.
+ * item in the side list (or name a new asset), click the map; drag a marker
+ * to move it; remove an asset from the list. Every edit goes to PUT /api/geo/<id>,
+ * which persists it and broadcasts the table to the whole mesh. The panel
+ * chrome (title, toolbar) is the caller's; this renders the map block only.
  */
-export function MapPanel({ state, editable, height = 340, onError, pickOrigin, onPickOrigin }: {
+export function MapPanel({ state, editable, height = 340, onError, pickOrigin, onPickOrigin, visible = true }: {
   state: MeshState; editable: boolean; height?: number; onError?: (m: string) => void;
   /** When set, the next map click is reported here (GCS scenario launcher) instead of placing. */
   pickOrigin?: boolean; onPickOrigin?: (p: { lat: number; lng: number }) => void;
+  /** False while the map is hidden behind another tab; Leaflet re-measures when it comes back. */
+  visible?: boolean;
 }) {
   const el = useRef<HTMLDivElement>(null);
   const map = useRef<L.Map | null>(null);
@@ -93,6 +94,8 @@ export function MapPanel({ state, editable, height = 340, onError, pickOrigin, o
   const drawn = basemap === "offline" || offline; // the bundled basemap is (or is about to be) on screen
   const items = placeables(state);
   const selectedRef = useRef<{ id: string; kind: GeoEntry["kind"]; label?: string } | null>(null);
+  const markers = useRef(new Map<string, L.Marker>());
+  const trackLayers = useRef(new Map<string, TrackLayers>());
 
   // Create the map once.
   useEffect(() => {
@@ -125,6 +128,9 @@ export function MapPanel({ state, editable, height = 340, onError, pickOrigin, o
     return () => { m.remove(); map.current = null; markers.current.clear(); trackLayers.current.clear(); };
   }, []);
 
+  // Shown again after being hidden behind the topology tab: Leaflet must re-measure its container.
+  useEffect(() => { if (visible) map.current?.invalidateSize(); }, [visible]);
+
   // Basemap mode. The bundled GeoJSON (~60 KB, src/basemap/) is a separate
   // chunk fetched from our own origin on first need, so it works with no internet.
   useEffect(() => {
@@ -147,11 +153,7 @@ export function MapPanel({ state, editable, height = 340, onError, pickOrigin, o
     return () => { cancelled = true; };
   }, [basemap, drawn]);
 
-  // Markers: one per placed item, kept across renders. A push that changes a
-  // status, a label or a position updates the marker in place; only items that
-  // appear or vanish add or remove a marker. (The effect itself only runs when
-  // one of its slices changed — the control plane pushes patches, not snapshots.)
-  const markers = useRef(new Map<string, L.Marker>());
+  // Markers: one per placed item, kept across renders and updated in place.
   useEffect(() => {
     const m = map.current, g = layer.current;
     if (!m || !g) return;
@@ -192,7 +194,6 @@ export function MapPanel({ state, editable, height = 340, onError, pickOrigin, o
   // dashed line to the target, ✖ at impact. Layers are kept per track and
   // updated in place: the head marker's element survives each 1 Hz update, so
   // the CSS transition on its transform (see styles) makes the motion continuous.
-  const trackLayers = useRef(new Map<string, TrackLayers>());
   useEffect(() => {
     const g = trackLayer.current;
     if (!g) return;
@@ -208,8 +209,8 @@ export function MapPanel({ state, editable, height = 340, onError, pickOrigin, o
       const pts = t.positions.map((p) => [p.lat, p.lng] as L.LatLngTuple);
       const head = t.positions[t.positions.length - 1];
       const target = t.target ? state.geo.entries[t.target] : undefined;
-      const eta = head.eta !== undefined && live ? ` · ETA ${Math.max(0, Math.round(head.eta / 1000))}s` : "";
-      const stateTxt = t.state === "neutralised" ? "✔ NEUTRALISED" : t.state === "impact" ? "✖ IMPACT" : t.state === "lost" ? "lost" : t.state === "engaging" ? "engaging" : "inbound";
+      const eta = head.eta !== undefined && live ? ` · ETA ${Math.max(0, Math.round(head.eta / 1000))} s` : "";
+      const stateTxt = t.state === "neutralised" ? "✔ neutralised" : t.state === "impact" ? "✖ impact" : t.state === "lost" ? "lost" : t.state === "engaging" ? "engaging" : "inbound";
       const rot = head.heading ?? 0;
       const glyph = t.state === "impact"
         ? `<div class="track-head impact" style="--c:${color}">✖</div>`
@@ -237,8 +238,8 @@ export function MapPanel({ state, editable, height = 340, onError, pickOrigin, o
         tl.line.setStyle(lineStyle);
         tl.head.setLatLng([head.lat, head.lng]);
         if (tl.html !== html) {
-          const el = tl.head.getElement();
-          if (el) el.innerHTML = html; // in place: the element (and its transition) survive
+          const el2 = tl.head.getElement();
+          if (el2) el2.innerHTML = html; // in place: the element (and its transition) survive
           tl.html = html;
         }
         tl.head.setTooltipContent(tip);
@@ -279,73 +280,65 @@ export function MapPanel({ state, editable, height = 340, onError, pickOrigin, o
   };
 
   const unplaced = items.filter((p) => !p.placed && p.kind === "device");
+  const devices = items.filter((p) => p.kind === "device");
+  const assets = items.filter((p) => p.kind === "asset");
 
   return (
-    <div className="panel map-panel">
-      <h2>
-        Map — Singapore
-        {state.geo.version > 0 && (
-          <span className="muted" style={{ fontWeight: 400, textTransform: "none", letterSpacing: 0, marginLeft: 8 }}>
-            table v{state.geo.version} by {state.geo.updatedBy}
-          </span>
-        )}
-        {basemap === "offline" ? (
-          <span className="remote-tag" style={{ marginLeft: 8 }}>bundled basemap · no network</span>
-        ) : offline && (
-          <span className="remote-tag" style={{ marginLeft: 8, color: "var(--suspect)", background: "rgba(245,184,65,.15)" }}>tiles unreachable → bundled basemap</span>
-        )}
-        {pickOrigin && <span className="remote-tag" style={{ marginLeft: 8, color: "var(--suspect)", background: "rgba(245,184,65,.15)" }}>click the map: launch origin</span>}
-        <button className="map-fit" style={{ marginLeft: "auto" }}
-          title={basemap === "auto" ? "stop loading OpenStreetMap tiles and draw the bundled Singapore basemap — works with no internet" : "load OpenStreetMap tiles again when reachable"}
+    <div className="map-block">
+      <div className="map-toolbar">
+        {state.geo.version > 0 && <span className="muted small">table v{state.geo.version} by {state.geo.updatedBy}</span>}
+        {basemap === "offline" ? <Pill tone="lh">bundled basemap · no network</Pill> : offline && <Pill tone="warn">tiles unreachable → bundled basemap</Pill>}
+        {pickOrigin && <Pill tone="warn">click the map to set the launch origin</Pill>}
+        {selected && editable && <Pill tone="info">click the map to place {items.find((p) => p.id === selected)?.label ?? selected} · click it again to cancel</Pill>}
+        <span className="spacer" />
+        <button type="button" className="btn sm quiet" aria-pressed={basemap === "offline"}
+          title={basemap === "auto" ? "Stop loading OpenStreetMap tiles and draw the bundled Singapore basemap — works with no internet" : "Load OpenStreetMap tiles again when reachable"}
           onClick={() => setBasemap((b) => (b === "auto" ? "offline" : "auto"))}>
-          {basemap === "auto" ? "🗺 offline map" : "🌐 online tiles"}
+          {basemap === "auto" ? "Offline basemap" : "Online tiles"}
         </button>
-        <button className="map-fit" style={{ marginLeft: 6 }} title="fit the map to every device, asset and trajectory" onClick={fitAll}>⤢ fit</button>
-      </h2>
+        <button type="button" className="btn sm quiet" title="Fit the map to every device, asset and trajectory" onClick={fitAll}>Fit</button>
+      </div>
       <div className="map-row">
         {/* Leaflet owns the inner div's classes; React owns the wrapper's, so toggling ours never wipes Leaflet's. */}
         <div className={`map${pickOrigin ? " picking" : ""}${drawn ? " drawn" : ""}${zoomLo ? " zoom-lo" : ""}`} style={{ height }}>
-          <div ref={el} style={{ height: "100%" }} />
+          <div ref={el} style={{ height: "100%" }} aria-label="Map of Singapore" role="application" />
         </div>
         {editable && (
           <div className="map-side">
-            <div className="muted" style={{ fontSize: 11, marginBottom: 6 }}>
-              {selected ? "click the map to place it · click again to cancel" : "pick an item, then click the map · drag markers to move"}
-            </div>
-            {items.filter((p) => p.kind === "device").map((p) => (
-              <button key={p.id} className={`map-item${selected === p.id ? " on" : ""}`} onClick={() => pick(p.id, "device")}>
-                <span className="dot" style={{ background: STATUS_COLOR[p.status] }} />
+            <span className="lbl" style={{ marginTop: 0 }}>Devices</span>
+            {devices.map((p) => (
+              <button type="button" key={p.id} className={`map-item${selected === p.id ? " on" : ""}`} aria-pressed={selected === p.id} onClick={() => pick(p.id, "device")}>
+                <StatusGlyph status={p.status === "asset" ? "unknown" : p.status} />
                 <span className="map-item-name">{p.label}</span>
                 <span className="muted">{p.placed ? "placed" : "unplaced"}</span>
               </button>
             ))}
-            <div className="muted" style={{ fontSize: 11, margin: "8px 0 4px" }}>defended assets</div>
-            {items.filter((p) => p.kind === "asset").map((p) => (
+            <span className="lbl">Defended assets</span>
+            {assets.map((p) => (
               <div key={p.id} className={`map-item${selected === p.id ? " on" : ""}`}>
-                <button style={{ all: "unset", cursor: "pointer", display: "flex", gap: 6, alignItems: "center", flex: 1 }} onClick={() => pick(p.id, "asset", p.label)}>
-                  <span className="dot" style={{ background: STATUS_COLOR.asset }} />
+                <button type="button" style={{ all: "unset", cursor: "pointer", display: "flex", gap: 6, alignItems: "center", flex: 1, minWidth: 0 }} aria-pressed={selected === p.id} onClick={() => pick(p.id, "asset", p.label)}>
+                  <StatusGlyph status="asset" />
                   <span className="map-item-name">{p.label}</span>
                 </button>
-                <button className="danger" style={{ padding: "0 6px" }} title="remove asset"
-                  onClick={() => api.removeGeo(p.id).catch((err: Error) => onError?.(err.message))}>×</button>
+                <button type="button" className="icon-btn" aria-label={`Remove ${p.label}`} title={`Remove ${p.label}`}
+                  onClick={() => api.removeGeo(p.id).catch((err: Error) => onError?.(err.message))}>✕</button>
               </div>
             ))}
-            <div className="row" style={{ marginTop: 6 }}>
-              <input size={12} placeholder="new asset, e.g. Changi" value={newAsset}
-                onChange={(e) => setNewAsset(e.target.value)} onKeyDown={(e) => e.key === "Enter" && startNewAsset()} />
-              <button onClick={startNewAsset} disabled={!newAsset.trim()}>+ place</button>
-            </div>
-            <button style={{ marginTop: 8 }} title="place the demo assets (Changi and Paya Lebar airbases, Tuas Port, Jurong Island, Sembawang, Marina Bay) and every device not on the map yet — one click to a demo-ready map"
+            <form className="row end" style={{ marginTop: 6 }} onSubmit={(e) => { e.preventDefault(); startNewAsset(); }}>
+              <Field label="New asset" grow><input id="map-new-asset" placeholder="e.g. Changi" value={newAsset} onChange={(e) => setNewAsset(e.target.value)} /></Field>
+              <button type="submit" className="btn sm" disabled={!newAsset.trim()}>Place</button>
+            </form>
+            <button type="button" className="btn sm" style={{ marginTop: 6 }}
+              title="Place the demo assets (Changi and Paya Lebar airbases, Tuas Port, Jurong Island, Sembawang, Marina Bay) and every device not on the map yet"
               onClick={() => api.seedGeo().catch((err: Error) => onError?.(err.message))}>
-              ⊕ seed Singapore demo layout
+              Seed Singapore layout
             </button>
-            {unplaced.length > 0 && (
-              <div className="muted" style={{ fontSize: 11, marginTop: 8 }}>
-                {unplaced.length} device{unplaced.length === 1 ? "" : "s"} not on the map yet
-              </div>
-            )}
+            {unplaced.length > 0 && <span className="muted small">{unplaced.length} device{unplaced.length === 1 ? "" : "s"} not on the map yet</span>}
           </div>
         )}
+      </div>
+      <div className="map-legend" aria-label="Map legend">
+        <Pill tone="lh">◆ asset</Pill><Pill tone="ok">● device alive</Pill><Pill tone="warn">◌ device suspect</Pill><Pill tone="bad">⊗ device offline</Pill><Pill tone="threat">— track</Pill>
       </div>
     </div>
   );

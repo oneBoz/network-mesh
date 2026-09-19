@@ -1,7 +1,6 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { api, subscribe } from "./api";
 import type { InboxMessage, LogEvent, MeshState, ThreatAssignmentEvent, ThreatType } from "./types";
-import { TopologyGraph } from "./TopologyGraph";
 import { ConvergenceMatrix } from "./ConvergenceMatrix";
 import { ProcPanel } from "./ProcPanel";
 import { ResolvePanel } from "./ResolvePanel";
@@ -9,10 +8,12 @@ import { ThreatPanel } from "./ThreatPanel";
 import { SignalsPanel } from "./SignalsPanel";
 import { GcsView } from "./GcsView";
 import { EventLog } from "./EventLog";
-import { MapPanel } from "./MapPanel";
 import { LighthouseModeView } from "./LighthouseView";
 import { TimelinePanel } from "./Engagement";
-import { groupRemotes } from "./remotes";
+import { StatusStrip } from "./StatusStrip";
+import { SituationPanel } from "./Situation";
+import { ConfirmSheet, Disclosure, Pill } from "./ui";
+import type { ConfirmRequest } from "./ui";
 
 const MAX_LOG = 300;
 const MAX_MESSAGES = 100; // mirrors the control plane's cap
@@ -28,13 +29,15 @@ function upsertMessage(list: InboxMessage[], m: InboxMessage): InboxMessage[] {
   return [...list, m].slice(-MAX_MESSAGES);
 }
 
-/** Two operator modes on the same control plane:
- *  - command: the full picture (topology, convergence, fleet, log) plus the
- *    live feed of GCS signals and the actions the mesh took on them;
+/** Three operator modes on the same control plane:
+ *  - command: the full picture — status strip, situation (map / topology) with the
+ *    engagement timeline, fleet, threat injection, GCS signals, then diagnostics folded away;
  *  - gcs: a Ground Control Station screen that sends signals and shows what
- *    every station (this one and the others, on any device) is seeing.
- *  The same device can run both — open two tabs. */
+ *    every station (this one and the others, on any device) is seeing;
+ *  - lighthouse: what this device's lighthouses see.
+ *  The same device can run all three — open several tabs. */
 export type Mode = "command" | "gcs" | "lighthouse";
+const MODE_LABEL: Record<Mode, string> = { command: "Command", gcs: "GCS", lighthouse: "Lighthouse" };
 
 function initialMode(): Mode {
   const fromUrl = new URLSearchParams(location.search).get("mode");
@@ -73,13 +76,17 @@ export function App() {
   const [connected, setConnected] = useState(false);
   const [activeThreat, setActiveThreat] = useState<ThreatAssignmentEvent | null>(null);
   const [mode, setMode] = useState<Mode>(initialMode);
+  const [confirmReq, setConfirmReq] = useState<ConfirmRequest | null>(null);
   const threatTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const confirm = useCallback((req: ConfirmRequest) => setConfirmReq(req), []);
+  const closeConfirm = useCallback(() => setConfirmReq(null), []);
 
   useEffect(() => {
     try { localStorage.setItem(MODE_KEY, mode); } catch { /* ignore */ }
     const url = new URL(location.href);
     url.searchParams.set("mode", mode);
     history.replaceState(null, "", url);
+    document.title = `mesh-ts · ${MODE_LABEL[mode]}`;
   }, [mode]);
 
   useEffect(() => {
@@ -124,56 +131,35 @@ export function App() {
   const onError = (m: string) =>
     setEvents((prev) => [...prev, { id: ++logSeq, source: "backend", line: `error: ${m}`, ts: Date.now() }].slice(-MAX_LOG));
 
-  const nodes = state.procs.filter((p) => p.kind === "node");
-  const liveNodes = nodes.filter((p) => p.running).length;
-  const lighthouses = state.procs.filter((p) => p.kind === "lighthouse");
-  const liveLh = lighthouses.filter((p) => p.running).length;
-  const aliveRemotes = state.remotes.filter((r) => r.status === "alive").length;
-  const remoteDevices = groupRemotes(state.remotes);
-  const internet = state.remotes.length > 0 || state.extraLighthouses.length > 0;
+  const liveNodes = state.procs.filter((p) => p.kind === "node" && p.running).length;
+  const liveLh = state.procs.filter((p) => p.kind === "lighthouse" && p.running).length;
+  const observers = state.views.filter((v) => v.reachable).length;
+  const subjects = new Set([...state.procs.filter((p) => p.kind === "node").map((p) => p.name), ...state.remotes.map((r) => r.id)]).size;
+
+  const stopAll = () => confirm({
+    title: "Stop the whole fleet?",
+    body: "Every lighthouse and node on this device is killed at once. Their specs are kept, so Boot demo mesh brings them back; scenario launches still pending are dropped.",
+    confirmLabel: "Stop all",
+    destructive: true,
+    onConfirm: () => { api.stopAll().catch((e: Error) => onError(e.message)); },
+  });
 
   return (
     <div className={`app mode-${mode}`}>
-      <header>
-        <h1>mesh-ts</h1>
-        <div className="mode-switch" role="tablist" aria-label="mode">
-          <button role="tab" aria-selected={mode === "command"}
-            className={mode === "command" ? "on" : undefined} onClick={() => setMode("command")}>
-            ⌂ Command
-          </button>
-          <button role="tab" aria-selected={mode === "gcs"}
-            className={mode === "gcs" ? "on" : undefined} onClick={() => setMode("gcs")}>
-            ◎ GCS
-          </button>
-          <button role="tab" aria-selected={mode === "lighthouse"}
-            className={mode === "lighthouse" ? "on" : undefined} onClick={() => setMode("lighthouse")}
-            title="what this device's lighthouses see: registrations, moves, rejected packets">
-            ◇ Lighthouse
-          </button>
+      <header className="bar">
+        <h1 className="wordmark">mesh-ts<small>{MODE_LABEL[mode]}{state.device ? ` · ${state.device}` : ""}</small></h1>
+        <div className="seg" role="tablist" aria-label="Mode">
+          {(["command", "gcs", "lighthouse"] as Mode[]).map((m) => (
+            <button key={m} type="button" role="tab" aria-selected={mode === m} onClick={() => setMode(m)}
+              title={m === "lighthouse" ? "What this device's lighthouses see: registrations, moves, rejected packets" : m === "gcs" ? "Ground control station: report threats and act on targets" : "The full picture"}>
+              {MODE_LABEL[m]}
+            </button>
+          ))}
         </div>
-        <div className="stats">
-          {state.device && <span title="this machine (DEVICE_NAME)">on <b>{state.device}</b></span>}
-          <span><b>{liveNodes}</b>/{nodes.length} nodes</span>
-          <span><b>{liveLh}</b>/{lighthouses.length} lighthouses</span>
-          {internet && (
-            <span title={`members on other machines, reached over the internet via ${state.extraLighthouses.join(", ") || "a shared lighthouse"}`}>
-              <b>{aliveRemotes}</b>/{state.remotes.length} remote on <b>{remoteDevices.length}</b> device{remoteDevices.length === 1 ? "" : "s"}
-              {remoteDevices.length > 0 && <span className="muted"> ({remoteDevices.map((d) => d.device).join(", ")})</span>}
-              {" "}<span className="remote-tag">internet</span>
-            </span>
-          )}
-          <span style={{ color: connected ? "var(--alive)" : "var(--dead)" }}>
-            {connected ? "● live" : "○ backend offline — run: npm run backend"}
-          </span>
-        </div>
-        <div className="spacer" />
-        <button className="primary" onClick={() => api.bootDemo().catch((e: Error) => onError(e.message))}>
-          Boot demo mesh
-        </button>
-        <button className="danger" disabled={!liveNodes && !liveLh}
-          onClick={() => api.stopAll().catch((e: Error) => onError(e.message))}>
-          Stop all
-        </button>
+        <span className="spacer" />
+        <Pill tone={connected ? "ok" : "bad"} dot>{connected ? "Live" : "Backend offline — run: npm run backend"}</Pill>
+        <button type="button" className="btn primary" onClick={() => api.bootDemo().catch((e: Error) => onError(e.message))}>Boot demo mesh</button>
+        <button type="button" className="btn destructive" disabled={!liveNodes && !liveLh} onClick={stopAll}>Stop all…</button>
       </header>
 
       {mode === "gcs" ? (
@@ -181,28 +167,31 @@ export function App() {
       ) : mode === "lighthouse" ? (
         <LighthouseModeView state={state} events={events} />
       ) : (
-        <div className="layout">
-          <div className="col">
-            <div className="panel graph-panel">
-              <h2>Topology — consensus view</h2>
-              <TopologyGraph state={state} activeThreat={activeThreat} />
-            </div>
-            <MapPanel state={state} editable onError={onError} />
-            <div className="panel">
-              <h2>Convergence — who believes what</h2>
-              <ConvergenceMatrix state={state} />
-            </div>
-          </div>
-          <div className="col">
-            <SignalsPanel state={state} onError={onError} />
+        <>
+          <StatusStrip state={state} />
+          <div className="situation">
+            <SituationPanel state={state} activeThreat={activeThreat} onError={onError} />
             <TimelinePanel state={state} />
-            <ProcPanel state={state} onError={onError} />
-            <ThreatPanel state={state} activeThreat={activeThreat} onError={onError} />
-            <ResolvePanel state={state} />
-            <EventLog events={events} />
           </div>
-        </div>
+          <div className="act">
+            <ProcPanel state={state} onError={onError} confirm={confirm} />
+            <ThreatPanel state={state} activeThreat={activeThreat} onError={onError} />
+            <SignalsPanel state={state} onError={onError} />
+          </div>
+          <Disclosure id="matrix" title="Convergence matrix" summary={observers ? `${observers} observer${observers === 1 ? "" : "s"} · ${subjects} subject${subjects === 1 ? "" : "s"} · who believes what` : "no observers yet"}>
+            <ConvergenceMatrix state={state} />
+          </Disclosure>
+          <div className="two">
+            <Disclosure id="resolve" title="Resolve a service" summary="Consul-style lookup through any node">
+              <ResolvePanel state={state} />
+            </Disclosure>
+            <Disclosure id="log" title="Live log" summary={`${events.length} line${events.length === 1 ? "" : "s"} · ${state.procs.filter((p) => p.running).length} processes`}>
+              <EventLog events={events} />
+            </Disclosure>
+          </div>
+        </>
       )}
+      <ConfirmSheet req={confirmReq} onClose={closeConfirm} />
     </div>
   );
 }

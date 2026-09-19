@@ -25,18 +25,32 @@ Open http://localhost:5173 and press **Boot demo mesh**. Every lighthouse and
 node the dashboard shows is a *real OS process* spawned by the backend — the
 UI just renders what the control plane streams:
 
-- **Topology** — node color is what the *mesh believes* (majority across all
-  nodes' views); a dashed red ring means the process is actually down.
-- **Convergence matrix** — each row is one node's `/members` view of everyone
-  else. Disagreement after a crash, healing after a revive.
-- **Fleet** — add nodes/lighthouses, crash (`kill`) and `revive` them. Add a
-  lighthouse before adding your first node — a node needs one to join.
-- **Inject a threat** — missile / swarm / aircraft / emp, ingested by any (or a
+Command mode is laid out by what an operator does (see `docs/WORKLOG.md`,
+2026-09-19, for the design rationale and the accessibility checklist):
+
+- **Status strip** — local nodes alive, remote devices reachable, live
+  targets, agreement on the last signal; each tile's stripe is its state.
+- **Situation** — the map (default) and the topology behind one segmented
+  control, with the engagement timeline docked beside them. Topology glyphs
+  encode belief as shape and word before colour (filled = alive, dashed ring =
+  suspect, cross badge = dead, dashed red ring = process actually down); every
+  glyph is keyboard-focusable and arrow keys nudge it.
+- **Fleet** — add nodes/lighthouses, Kill (immediate) and Revive them; Remove
+  sits under the … menu and asks first. Stop all in the header asks first too.
+- **Inject a threat** — missile / swarm / aircraft / EMP, ingested by any (or a
   chosen) node. The mesh's ranked answer (primary → fallbacks) is shown in the
   panel, the primary pulses on the topology graph, and every node's identical
   assignment line appears in the log. Kill the primary, re-inject, and watch
   the next layer step in.
-- **Resolve** — service discovery through any live node, like Consul DNS.
+- **GCS signals** — every signal on the mesh with its chain, agreement and
+  lifecycle badge.
+- **Diagnostics**, collapsed by default — the convergence matrix (each row is
+  one node's `/members` view of everyone else), the service resolver (Consul
+  DNS through any live node) and the live log.
+
+`src/ui.tsx` holds the shared primitives (pills, status glyphs, threat icons,
+labelled fields, disclosures, the … menu, the confirmation sheet); the token
+set lives at the top of `src/styles.css`. Dark only, by decision.
 
 All `/api` traffic (including the SSE stream) is proxied to `127.0.0.1:7070`
 by the Vite dev server — see `vite.config.ts`.

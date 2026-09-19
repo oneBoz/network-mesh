@@ -1,23 +1,15 @@
-import { useEffect, useState } from "react";
-import type { LighthouseView as LhView, LogEvent, MeshState } from "./types";
+import { useState } from "react";
+import type { LighthouseView as LhView, LogEvent, MeshState, RegistryEntry } from "./types";
 import { EventLog } from "./EventLog";
 import { systemOf } from "./defense";
+import { PanelHead, Pill, Segmented, StatusGlyph, ago, uptime, useNow } from "./ui";
 
-const ago = (ms: number) => (ms < 1_000 ? "now" : ms < 60_000 ? `${Math.round(ms / 1000)}s ago` : `${Math.round(ms / 60_000)}m ago`);
-const uptime = (ms: number) => (ms < 60_000 ? `${Math.round(ms / 1000)}s` : ms < 3_600_000 ? `${Math.round(ms / 60_000)}m` : `${(ms / 3_600_000).toFixed(1)}h`);
-
-/** A clock that ticks once a second. The control plane only pushes a registry
- *  when it changes, so "last seen … ago" and uptime keep time here instead. */
-function useNow(everyMs = 1_000): number {
-  const [now, setNow] = useState(Date.now);
-  useEffect(() => {
-    const t = setInterval(() => setNow(Date.now()), everyMs);
-    return () => clearInterval(t);
-  }, [everyMs]);
-  return now;
-}
-
-const isLighthouseSource = (e: LogEvent) => e.source.startsWith("lh-") || /lighthouse|REJECTED|id conflict|moved/.test(e.line);
+// Stable filter functions (EventLog is memoised on them).
+const FILTERS: Record<"all" | "rejections" | "moves", (e: LogEvent) => boolean> = {
+  all: (e) => e.source.startsWith("lh-") || /lighthouse|REJECTED|id conflict|moved/.test(e.line),
+  rejections: (e) => /REJECTED|rejected packet/.test(e.line),
+  moves: (e) => /moved|id conflict/.test(e.line),
+};
 
 /**
  * Lighthouse mode: what this device's lighthouses see. A lighthouse is the
@@ -27,91 +19,149 @@ const isLighthouseSource = (e: LogEvent) => e.source.startsWith("lh-") || /light
  * the live stdout of the lighthouse processes only.
  */
 export function LighthouseModeView({ state, events }: { state: MeshState; events: LogEvent[] }) {
+  const now = useNow();
+  const [view, setView] = useState<"node" | "lighthouse">("node");
+  const [logFilter, setLogFilter] = useState<keyof typeof FILTERS>("all");
   const lhs = state.lighthouses;
   const running = state.procs.filter((p) => p.kind === "lighthouse" && p.running).length;
-  const unique = new Set(lhs.flatMap((l) => l.entries.map((e) => e.id)));
-  const devices = new Set(lhs.flatMap((l) => l.entries.map((e) => e.device ?? "?")));
+  const reachable = lhs.filter((l) => l.reachable);
+  const unique = new Set(reachable.flatMap((l) => l.entries.map((e) => e.id)));
+  const devices = new Set(reachable.flatMap((l) => l.entries.map((e) => e.device ?? "?")));
   const rejected = lhs.reduce((n, l) => n + l.rejected, 0);
   const joins = lhs.reduce((n, l) => n + l.joins, 0);
-  const signing = lhs.some((l) => l.reachable && l.signing);
+  const signing = reachable.some((l) => l.signing);
+  const staleMs = reachable[0]?.staleMs ?? 120_000;
+
+  // By node: one row per registered node, with the lighthouses that hold it.
+  const byNode = new Map<string, { e: RegistryEntry; on: Set<string> }>();
+  for (const l of reachable) for (const e of l.entries) {
+    const cur = byNode.get(e.id);
+    if (!cur) byNode.set(e.id, { e, on: new Set([l.name]) });
+    else { cur.on.add(l.name); if (e.lastSeen > cur.e.lastSeen) cur.e = e; }
+  }
+  const rows = [...byNode.values()].sort((a, b) => a.e.id.localeCompare(b.e.id));
 
   return (
-    <div className="lh-view">
+    <div className="stack">
+      <div className="strip" aria-label="Lighthouse status">
+        <div className="tile" style={{ "--stripe": "var(--lh)" } as React.CSSProperties}>
+          <span className="lbl">Lighthouses</span>
+          <span className="val">{running}<small>of {lhs.length} running</small></span>
+          <span className="det">{lhs.length ? lhs.map((l) => `udp ${l.port}`).join(" · ") : "none on this device"}</span>
+        </div>
+        <div className="tile" style={{ "--stripe": unique.size ? "var(--alive)" : "var(--muted)" } as React.CSSProperties}>
+          <span className="lbl">Registered</span>
+          <span className="val">{unique.size}<small>node{unique.size === 1 ? "" : "s"} · {devices.size} device{devices.size === 1 ? "" : "s"}</small></span>
+          <span className="det">{joins} joins since start</span>
+        </div>
+        <div className="tile" style={{ "--stripe": rejected ? "var(--dead)" : "var(--alive)" } as React.CSSProperties}>
+          <span className="lbl">Rejected packets</span>
+          <span className="val" style={rejected ? { color: "var(--dead)" } : undefined}>{rejected}</span>
+          <span className="det">{rejected ? "someone without the key is knocking — see the log" : "nobody is knocking with the wrong key"}</span>
+        </div>
+        <div className="tile" style={{ "--stripe": signing ? "var(--alive)" : "var(--dead)" } as React.CSSProperties}>
+          <span className="lbl">Encryption</span>
+          <span className={`val text`} style={signing ? undefined : { color: "var(--dead)" }}>{reachable.length ? (signing ? "AES-256-GCM" : "Plaintext") : "—"}</span>
+          <span className="det">{reachable.length ? (signing ? "key required to join · replay window 60 s" : "anyone can join and read — set MESH_KEY") : "no reachable lighthouse"}</span>
+        </div>
+      </div>
+
+      {!lhs.length && (
+        <div className="panel">
+          <p className="empty">This device runs no lighthouse. <b>Boot demo mesh</b> starts three, or add one in Command mode with <b>Add lighthouse</b>.
+            Other devices join <i>this</i> device by putting one of its lighthouse addresses in their <code>EXTRA_LIGHTHOUSES</code>.</p>
+        </div>
+      )}
+      {state.extraLighthouses.length > 0 && (
+        <p className="muted small">External lighthouses this device joins: {state.extraLighthouses.join(", ")} — their registries live on those machines; open Lighthouse mode there to see them.</p>
+      )}
+
+      {lhs.length > 0 && (
+        <div className="panel">
+          <PanelHead title="Registry" sub={`what this device's lighthouses hand out · entries expire after ${Math.round(staleMs / 1000)} s of silence`}
+            right={<Segmented small label="Registry view" value={view} onChange={setView} options={[{ key: "node", label: "By node" }, { key: "lighthouse", label: "By lighthouse" }]} />} />
+          {view === "node" ? (
+            <div style={{ overflowX: "auto" }}>
+              <table className="matrix lh-table" style={{ width: "100%" }}>
+                <caption>One row per registered node; the last three columns show which lighthouses hold it. Ages tick locally.</caption>
+                <thead><tr>
+                  <th scope="col" className="left">Node</th><th scope="col" className="left">Device</th><th scope="col" className="left">Hands out</th><th scope="col">Inc</th><th scope="col">Last seen</th>
+                  {lhs.map((l) => <th key={l.name} scope="col">{l.name}</th>)}
+                </tr></thead>
+                <tbody>
+                  {rows.map(({ e, on }) => {
+                    const age = now - e.lastSeen;
+                    const stale = age > 60_000;
+                    const local = e.device === state.device;
+                    return (
+                      <tr key={e.id} style={stale ? { opacity: 0.6 } : undefined}>
+                        <th scope="row"><b>{systemOf(e.id, e.service)?.short ?? e.id}</b> <span className="muted">{e.id}</span></th>
+                        <td className="left">{e.device ?? "?"}{local && <> <Pill tone="info">here</Pill></>}</td>
+                        <td className="left mono">{e.host}:{e.port}{e.advertise ? " ⟡" : ""}</td>
+                        <td>{e.inc}</td>
+                        <td className={stale ? "age-bad" : undefined}>{ago(age)}</td>
+                        {lhs.map((l) => <td key={l.name}>{on.has(l.name) ? <span className="chip alive" aria-label={`registered on ${l.name}`}>✓</span> : <span className="chip unknown" aria-label={`not on ${l.name}`}>·</span>}</td>)}
+                      </tr>
+                    );
+                  })}
+                  {!rows.length && <tr><td colSpan={5 + lhs.length} className="muted left">no registrations yet</td></tr>}
+                </tbody>
+              </table>
+            </div>
+          ) : (
+            <div className="lh-cards">
+              {lhs.map((l) => <LighthouseCard key={l.name} lh={l} device={state.device} now={now} />)}
+            </div>
+          )}
+        </div>
+      )}
+
       <div className="panel">
-        <h2>This device as a lighthouse</h2>
-        {lhs.length ? (
-          <div className="lh-summary">
-            <span><b>{running}</b>/{lhs.length} lighthouses running</span>
-            <span><b>{unique.size}</b> nodes registered on <b>{devices.size}</b> device{devices.size === 1 ? "" : "s"}</span>
-            <span><b>{joins}</b> joins since start</span>
-            <span className={rejected ? "lh-bad" : undefined}><b>{rejected}</b> packets rejected{rejected ? " — someone without the key is knocking" : ""}</span>
-            <span>{signing ? <span className="agree-tag">ENCRYPTED (AES-256-GCM) — key required to join</span> : <span className="agree-tag bad">PLAINTEXT — anyone can join and read</span>}</span>
-          </div>
-        ) : (
-          <div className="muted" style={{ fontSize: 13 }}>
-            This device runs no lighthouse. <b>Boot demo mesh</b> starts three, or add one in Command mode with <b>+ Lighthouse</b>.
-            Other devices join <i>this</i> device by putting one of its lighthouse addresses in their <code>EXTRA_LIGHTHOUSES</code>.
-          </div>
-        )}
-        {state.extraLighthouses.length > 0 && (
-          <div className="muted" style={{ fontSize: 12, marginTop: 8 }}>
-            External lighthouses this device joins: {state.extraLighthouses.join(", ")} — their registries live on those machines; open Lighthouse mode there to see them.
-          </div>
-        )}
+        <PanelHead title="Lighthouse log" sub="joins, moves, rejections"
+          right={<Segmented small label="Log filter" value={logFilter} onChange={setLogFilter} options={[{ key: "all", label: "All" }, { key: "rejections", label: "Rejections" }, { key: "moves", label: "Moves" }]} />} />
+        <EventLog events={events} filter={FILTERS[logFilter]} height={380} />
       </div>
-
-      <div className="lh-grid">
-        {lhs.map((l) => <LighthouseCard key={l.name} lh={l} device={state.device} />)}
-      </div>
-
-      <EventLog events={events} title="Lighthouse log — joins, moves, rejections" filter={isLighthouseSource} height={380} />
     </div>
   );
 }
 
-function LighthouseCard({ lh, device }: { lh: LhView; device: string }) {
-  const now = useNow();
+function LighthouseCard({ lh, device, now }: { lh: LhView; device: string; now: number }) {
   const byDevice = new Map<string, number>();
   for (const e of lh.entries) byDevice.set(e.device ?? "?", (byDevice.get(e.device ?? "?") ?? 0) + 1);
   return (
-    <div className="panel lh-card">
+    <div className="well">
       <div className="lh-card-head">
-        <span className="dot" style={{ background: lh.reachable ? "var(--alive)" : "var(--dead)" }} />
+        <StatusGlyph status={lh.reachable ? "lh" : "down"} />
         <b style={{ color: "var(--lh)" }}>{lh.name}</b>
-        <span className="muted">udp/{lh.port}</span>
+        <span className="muted">udp {lh.port}</span>
         <span className="spacer" />
-        {lh.reachable ? (
-          <span className="muted">up {uptime(now - lh.startedAt)} · {lh.joins} joins · <span className={lh.rejected ? "lh-bad" : undefined}>{lh.rejected} rejected</span></span>
-        ) : (
-          <span className="muted">{lh.port ? "not running" : ""}</span>
-        )}
+        {lh.reachable
+          ? <span className="muted">up {uptime(now - lh.startedAt)} · {lh.joins} joins · <span className={lh.rejected ? "age-bad" : undefined}>{lh.rejected} rejected</span></span>
+          : <span className="muted">not running</span>}
       </div>
       {lh.reachable && (
         <>
-          <div className="muted" style={{ fontSize: 12, margin: "4px 0 6px" }}>
-            {lh.entries.length} registered · {[...byDevice.entries()].map(([d, n]) => `${d}: ${n}`).join(" · ") || "nobody yet"} · entries expire after {Math.round(lh.staleMs / 1000)}s of silence
-          </div>
+          <p className="muted small" style={{ margin: "4px 0 6px" }}>
+            {lh.entries.length} registered · {[...byDevice.entries()].map(([d, n]) => `${d}: ${n}`).join(" · ") || "nobody yet"}
+          </p>
           <div style={{ overflowX: "auto" }}>
             <table className="matrix lh-table">
-              <thead>
-                <tr><th style={{ textAlign: "left" }}>node</th><th style={{ textAlign: "left" }}>device</th><th style={{ textAlign: "left" }}>hands out</th><th>inc</th><th>last seen</th></tr>
-              </thead>
+              <thead><tr><th scope="col" className="left">node</th><th scope="col" className="left">device</th><th scope="col" className="left">hands out</th><th scope="col">inc</th><th scope="col">last seen</th></tr></thead>
               <tbody>
                 {lh.entries.map((e) => {
                   const age = now - e.lastSeen;
                   const stale = age > 60_000;
-                  const local = e.device === device;
                   return (
-                    <tr key={e.id} style={stale ? { opacity: 0.45 } : undefined} title={`${e.service ?? ""} · observed at ${e.host}:${e.port}${e.advertise ? ` (advertised ${e.advertise})` : ""}`}>
-                      <td style={{ textAlign: "left" }}><b>{systemOf(e.id, e.service)?.short ?? e.id}</b> <span className="muted">{e.id}</span></td>
-                      <td style={{ textAlign: "left" }}>{e.device ?? "?"}{local && <span className="mine-tag" style={{ marginLeft: 6 }}>here</span>}</td>
-                      <td style={{ textAlign: "left", fontFamily: "Consolas, 'Cascadia Mono', monospace", fontSize: 11.5 }}>{e.host}:{e.port}{e.advertise ? " ⟡" : ""}</td>
+                    <tr key={e.id} style={stale ? { opacity: 0.6 } : undefined}>
+                      <th scope="row"><b>{systemOf(e.id, e.service)?.short ?? e.id}</b> <span className="muted">{e.id}</span></th>
+                      <td className="left">{e.device ?? "?"}{e.device === device && <> <Pill tone="info">here</Pill></>}</td>
+                      <td className="left mono">{e.host}:{e.port}{e.advertise ? " ⟡" : ""}</td>
                       <td>{e.inc}</td>
-                      <td className={stale ? "lh-bad" : undefined}>{ago(age)}</td>
+                      <td className={stale ? "age-bad" : undefined}>{ago(age)}</td>
                     </tr>
                   );
                 })}
-                {!lh.entries.length && <tr><td colSpan={5} className="muted" style={{ textAlign: "left" }}>no registrations yet</td></tr>}
+                {!lh.entries.length && <tr><td colSpan={5} className="muted left">no registrations yet</td></tr>}
               </tbody>
             </table>
           </div>

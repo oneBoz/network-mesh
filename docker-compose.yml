@@ -17,6 +17,12 @@ services:
       EXTRA_LIGHTHOUSES: ${EXTRA_LIGHTHOUSES:-}
       DEVICE_NAME: ${DEVICE_NAME:-local-device}
       MESH_PROFILE: ${MESH_PROFILE:-local}   # local | internet | mobile (timers + keepalive preset)
+      # Recording-only timer overrides (empty = profile default). Used by
+      # docs/video/segment6/record.mjs to fit kill → dead → rejoin in 12 s.
+      PROTOCOL_PERIOD_MS: ${PROTOCOL_PERIOD_MS:-}
+      ACK_TIMEOUT_MS: ${ACK_TIMEOUT_MS:-}
+      INDIRECT_TIMEOUT_MS: ${INDIRECT_TIMEOUT_MS:-}
+      SUSPECT_TIMEOUT_MS: ${SUSPECT_TIMEOUT_MS:-}
       DATA_DIR: /data                        # location table etc. persist across restarts (volume below)
       ADVERTISE: ${ADVERTISE:-}   # only when this host has a public IP and joins a lighthouse on itself
     volumes:

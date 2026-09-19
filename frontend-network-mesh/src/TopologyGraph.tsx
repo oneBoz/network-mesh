@@ -2,14 +2,14 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { MeshState, NodeStatus, RemoteMember, ThreatAssignmentEvent } from "./types";
 import { consensus } from "./consensus";
 import { defenseTooltip, systemName, systemOf } from "./defense";
-import { groupRemotes, remoteDevice } from "./remotes";
+import { deviceStatus, groupRemotes, remoteDevice } from "./remotes";
 import type { RemoteDevice } from "./remotes";
 
 const COLOR: Record<NodeStatus | "unknown", string> = {
   alive: "var(--alive)",
   suspect: "var(--suspect)",
   dead: "var(--dead)",
-  unknown: "var(--faint)",
+  unknown: "var(--muted)",
 };
 
 const W = 800;
@@ -66,15 +66,7 @@ function loadJson<T>(key: string, fallback: T): T {
 
 const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v));
 
-/** Worst-of consensus for a whole device: suspect if any member is suspect,
- *  dead only if every member is dead, alive if every member is alive. */
-function deviceBelief(d: RemoteDevice): NodeStatus | "unknown" {
-  const statuses = d.members.map((m) => m.status);
-  if (statuses.every((s) => s === "dead")) return "dead";
-  if (statuses.some((s) => s === "suspect")) return "suspect";
-  if (statuses.some((s) => s === "alive")) return "alive";
-  return "unknown";
-}
+const deviceBelief = (d: RemoteDevice): NodeStatus | "unknown" => deviceStatus(d);
 
 /**
  * Live topology. Node color = mesh consensus about that node; a dashed red
@@ -283,11 +275,27 @@ export function TopologyGraph({
     if (drag.current && !drag.current.moved) onClick?.();
     drag.current = null;
   };
-  const dragProps = (name: string, current: XY, onClick?: () => void) => ({
+  // Every glyph is focusable: arrows nudge it (Shift for bigger steps), Enter or Space is a click.
+  const dragProps = (name: string, current: XY, onClick?: () => void, label?: string) => ({
     onPointerDown: startDrag(name, current),
     onPointerMove: moveDrag,
     onPointerUp: endDrag(onClick),
     onPointerCancel: endDrag(),
+    tabIndex: 0,
+    role: "button",
+    "aria-label": label ?? name,
+    onKeyDown: (e: React.KeyboardEvent<SVGGElement>) => {
+      const step = e.shiftKey ? 20 : 8;
+      const d: Record<string, [number, number]> = { ArrowLeft: [-step, 0], ArrowRight: [step, 0], ArrowUp: [0, -step], ArrowDown: [0, step] };
+      if (d[e.key]) {
+        e.preventDefault();
+        const [dx, dy] = d[e.key];
+        setPos((prev) => ({ ...prev, [name]: { x: clamp(current.x + dx, MARGIN, W - MARGIN), y: clamp(current.y + dy, MARGIN, H - MARGIN) } }));
+      } else if ((e.key === "Enter" || e.key === " ") && onClick) {
+        e.preventDefault();
+        onClick();
+      }
+    },
     style: {
       cursor: linkMode && onClick ? "crosshair" : "grab",
       touchAction: "none",
@@ -308,7 +316,8 @@ export function TopologyGraph({
     const sys = systemOf(id, service);
     return (
       <g key={id} transform={`translate(${at.x},${at.y})`}
-        {...dragProps(id, at, () => clickGlyph(id))}>
+        {...dragProps(id, at, () => clickGlyph(id), `${sys?.name ?? id}, ${belief}${running ? "" : ", process down"}${remote ? `, on ${remoteDevice(remote)}` : ""}`)}>
+        <circle className="focus-ring" r={31} fill="none" stroke="var(--accent)" strokeWidth={2} />
         <title>
           {(defenseTooltip(id, service) ?? id) + (remote
             ? `\nREMOTE — on ${remoteDevice(remote)}, reached over the internet at ${remote.host}:${remote.port}\nbelief: ${remote.status} (${remote.observers} local observers)`
@@ -342,8 +351,13 @@ export function TopologyGraph({
         {remote && (
           <circle r={26} fill="none" stroke="var(--accent)" strokeOpacity={0.7} strokeWidth={1.5} strokeDasharray="2 4" />
         )}
-        <circle r={19} fill={COLOR[belief]} fillOpacity={0.22}
-          stroke={COLOR[belief]} strokeWidth={2.5} />
+        {/* Shape before colour: filled alive, dashed ring suspect, dotted unknown, cross badge dead. */}
+        <circle r={19} fill={COLOR[belief]} fillOpacity={belief === "alive" ? 0.28 : 0.1}
+          stroke={COLOR[belief]} strokeWidth={2.5}
+          strokeDasharray={belief === "suspect" ? "5 3" : belief === "unknown" ? "2 3" : undefined} />
+        {belief === "dead" && (
+          <g transform="translate(14,-14)"><circle r={6.5} fill="var(--well)" stroke={COLOR.dead} strokeWidth={1.5} /><path d="M-3 -3l6 6M3 -3l-6 6" stroke={COLOR.dead} strokeWidth={1.8} /></g>
+        )}
         <text textAnchor="middle" dy={4} fill="var(--text)"
           fontSize={sys ? 9 : id.length > 6 ? 9 : 12} fontWeight={700}>
           {sys?.short ?? id}
@@ -369,7 +383,8 @@ export function TopologyGraph({
     const CW = 124, CH = 62;
     const services = d.members.map((m) => systemOf(m.id, m.service)?.short ?? m.service ?? m.id);
     return (
-      <g key={id} transform={`translate(${at.x},${at.y})`} {...dragProps(id, at, () => clickGlyph(id))}>
+      <g key={id} transform={`translate(${at.x},${at.y})`} {...dragProps(id, at, () => clickGlyph(id), `device ${d.device}, ${belief}, ${d.alive} of ${d.members.length} alive`)}>
+        <rect className="focus-ring" x={-CW / 2 - 9} y={-CH / 2 - 9} width={CW + 18} height={CH + 18} rx={16} fill="none" stroke="var(--accent)" strokeWidth={2} />
         <title>
           {`${d.device} — ${d.members.length} node${d.members.length === 1 ? "" : "s"} at ${d.host}, ${d.alive} alive\n${d.members.map((m) => `${m.id}: ${m.status}`).join("\n")}\n(expand devices to see each node)`}
         </title>
@@ -396,7 +411,8 @@ export function TopologyGraph({
           </>
         )}
         <rect x={-CW / 2} y={-CH / 2} width={CW} height={CH} rx={10}
-          fill={COLOR[belief]} fillOpacity={0.14} stroke={COLOR[belief]} strokeWidth={2} />
+          fill={COLOR[belief]} fillOpacity={0.14} stroke={COLOR[belief]} strokeWidth={2}
+          strokeDasharray={belief === "suspect" ? "6 3" : undefined} />
         <rect x={-CW / 2} y={-CH / 2} width={CW} height={CH} rx={10}
           fill="none" stroke="var(--accent)" strokeOpacity={0.6} strokeWidth={1} strokeDasharray="2 4" />
         <text textAnchor="middle" y={-CH / 2 + 17} fill="var(--text)" fontSize={12} fontWeight={700}>
@@ -416,32 +432,32 @@ export function TopologyGraph({
   };
 
   return (
-    <>
-      <div className="row" style={{ marginBottom: 6, alignItems: "center", gap: 8 }}>
-        <button onClick={() => (linkMode ? cancelLinking() : setLinkMode(true))}
-          className={linkMode ? "primary" : undefined}>
-          {linkMode ? "cancel" : "+ router"}
+    <div className="topo">
+      <div className="topo-tools">
+        <button type="button" onClick={() => (linkMode ? cancelLinking() : setLinkMode(true))}
+          className={`btn sm${linkMode ? " primary" : ""}`}>
+          {linkMode ? "Cancel linking" : "Add router"}
         </button>
-        <button onClick={resetLayout}>reset layout</button>
-        <button className={view.collapse ? "toggle on" : "toggle"} title="one card per remote device, or one glyph per remote node"
+        <button type="button" className="btn sm" onClick={resetLayout}>Reset layout</button>
+        <button type="button" className="btn sm" aria-pressed={!view.collapse} title="One card per remote device, or one glyph per remote node"
           onClick={() => setView((v) => ({ ...v, collapse: !v.collapse }))}
           disabled={!remoteDevices.length}>
-          {view.collapse ? "⊞ expand devices" : "⊟ collapse devices"}
+          {view.collapse ? "Expand devices" : "Collapse devices"}
         </button>
-        <button className={view.showLinks ? "toggle on" : "toggle"} title="show or hide the gossip links (who believes whom alive)"
+        <button type="button" className="btn sm" aria-pressed={view.showLinks} title="Show or hide the gossip links (who believes whom alive)"
           onClick={() => setView((v) => ({ ...v, showLinks: !v.showLinks }))}>
-          {view.showLinks ? "links on" : "links off"}
+          Gossip links
         </button>
-        <span style={{ color: "var(--muted)", fontSize: 12 }}>
+        <span className="hint">
           {linkMode
             ? linkFrom
-              ? `linking from ${systemOf(linkFrom)?.name ?? linkFrom} — click the other endpoint (esc cancels)`
-              : "click the two glyphs to join through a router (esc cancels)"
-            : "drag to rearrange · click a router to remove it"}
+              ? `linking from ${systemOf(linkFrom)?.name ?? linkFrom} — click the other endpoint (Esc cancels)`
+              : "click the two glyphs to join through a router (Esc cancels)"
+            : "drag or use arrow keys to rearrange · click a router to remove it"}
         </span>
       </div>
 
-      <svg ref={svgRef} viewBox={`0 0 ${W} ${H}`}>
+      <svg ref={svgRef} viewBox={`0 0 ${W} ${H}`} role="img" aria-label="Mesh topology: what the mesh believes about each node">
         {/* Physical links through commercial routers (visual only) */}
         {routers.map((rt) => {
           const pa = getPos(rt.a), pb = getPos(rt.b);
@@ -533,11 +549,12 @@ export function TopologyGraph({
           : remotes.map((m) => nodeGlyph(m.id, m.service, true, m))}
 
         <g transform={`translate(14,${H - 14})`} fontSize={11} fill="var(--muted)">
-          <circle cx={4} r={5} fill="var(--alive)" fillOpacity={0.4} stroke="var(--alive)" />
+          <circle cx={4} r={5} fill="var(--alive)" fillOpacity={0.5} stroke="var(--alive)" />
           <text x={14} dy={4}>alive (belief)</text>
-          <circle cx={110} r={5} fill="var(--suspect)" fillOpacity={0.4} stroke="var(--suspect)" />
+          <circle cx={110} r={5} fill="none" stroke="var(--suspect)" strokeWidth={1.5} strokeDasharray="3 2" />
           <text x={120} dy={4}>suspect</text>
-          <circle cx={190} r={5} fill="var(--dead)" fillOpacity={0.4} stroke="var(--dead)" />
+          <circle cx={190} r={5} fill="none" stroke="var(--dead)" strokeWidth={1.5} />
+          <path d="M187.5 -2.5l5 5M192.5 -2.5l-5 5" stroke="var(--dead)" strokeWidth={1.5} />
           <text x={200} dy={4}>dead</text>
           <circle cx={255} r={7} fill="none" stroke="var(--dead)" strokeDasharray="3 3" />
           <text x={268} dy={4}>process actually down</text>
@@ -554,6 +571,6 @@ export function TopologyGraph({
           )}
         </g>
       </svg>
-    </>
+    </div>
   );
 }

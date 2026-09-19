@@ -412,6 +412,115 @@ one-off ~9 s spawn-to-"up" gap for all eight children (cold image layers in
 the Docker Desktop VM, most likely); the next rebuild's first boot took
 93 ms. Boot the fleet once before the demo anyway.
 
+### 2026-09-19 — Dashboard redesign: situation / act / diagnose, WCAG, HIG
+
+A review of the dashboard against WCAG 2.2 and Apple's HIG (headless-Chrome
+captures of all three modes, contrast measured per token) found: `--faint` at
+1.9:1, `--dead` text at 4.4:1, control borders at 1.2:1, no visible focus, `×`
+buttons without names, twelve unlabelled inputs and selects, 28 hover-only
+tooltips, 9.5-11 px labels, colour-only belief on the topology, animations
+ignoring Reduce Motion, emoji as icons, destructive actions indistinguishable
+at rest, and every panel at equal weight so the timeline sat below the fold.
+A wireframe was vetted first (decisions: map first, a confirmation sheet for
+Stop all, keep the name mesh-ts, dark only, diagnostics collapsed by default).
+
+Implemented in `frontend-network-mesh/src`:
+
+- **Tokens** (`styles.css`): new palette, every text role ≥ 6:1 on the panel,
+  control borders 3.1:1, `--threat` magenta so threats and tracks stop sharing
+  amber with suspect; system font stack, `ui-monospace`, tabular figures,
+  12 px floor (11 px only in monospace), 8-pt spacing, global
+  `:focus-visible` ring, `prefers-reduced-motion` kills every animation,
+  44 px controls when the pointer is coarse.
+- **Primitives** (`ui.tsx`): `Pill`, `StatusGlyph` (shape + word before
+  colour), `ThreatIcon` (SVG, `aria-hidden`), `Field` (label wraps control),
+  `Disclosure` (remembered per browser), `Segmented`, `MoreMenu` (native
+  `details`, Escape / outside click), `ConfirmSheet` (dialog, focus to Cancel,
+  Escape / backdrop cancel).
+- **Command** (`App.tsx`, `StatusStrip.tsx`, `Situation.tsx`): status strip;
+  Situation panel with Map | Topology (both stay mounted; Leaflet
+  `invalidateSize` on return) and the timeline beside it; Fleet / Inject a
+  threat / GCS signals row; Convergence matrix, Resolve and Live log as
+  disclosures, closed by default. Stop all… and Remove from fleet… confirm.
+  Kill is red at rest and immediate; Revive is the primary on a down node.
+- **Topology**: glyphs are focusable buttons with labels; arrows nudge
+  (Shift ×2.5), Enter/Space clicks; belief by shape; sentence-case tools.
+- **GCS**: station strip (station name is a labelled field), threat buttons
+  with drawn icons, Latest engagement card with Engage / Neutralised / Hand
+  over directly beneath (disabled with the reason when not responsible),
+  labelled launcher form, own-signals outlined in the accent.
+- **Lighthouse**: four tiles (rejected turns red when non-zero), one registry
+  table by node with a per-lighthouse ✓ column (by-lighthouse cards kept
+  behind a toggle), filterable log (All / Rejections / Moves).
+- **Map**: toolbar with state pills, shape-coded legend, labelled new-asset
+  field, named remove buttons, `role="application"` on the map.
+- **Log**: `role="log"` with `aria-live="off"`, a "paused while you read"
+  pill and Jump to latest; matrix has a caption and row/column scope.
+
+Not changed: wire protocol, control-plane API, any script. Every existing
+feature and endpoint is reachable from the new layout.
+
+### 2026-09-19 — Segment 6 video: live 12 s self-healing clip
+
+- The storyboard gives the kill → suspect → dead → rejoin → rediscover arc
+  12 s (1:48–2:00). At default timers it takes 17–20 s live: the suspect →
+  dead window in `node.ts` scales with membership and doubles to 10 s once
+  the Azure and vk-mac fleets are joined (~12 members).
+- `docker-compose.yml` now forwards `PROTOCOL_PERIOD_MS`, `ACK_TIMEOUT_MS`,
+  `INDIRECT_TIMEOUT_MS`, `SUSPECT_TIMEOUT_MS` (empty = profile default) so a
+  recording can shorten the local fleet's timers without touching code.
+- `docs/video/segment6/record.mjs` drives a headless Chrome tab over CDP with a
+  screencast and a drawn cursor that clicks Kill and Revive in the Fleet
+  panel; it waits on the dashboard's consensus rule at each beat instead of
+  fixed sleeps. `encode.mjs` turns the frames into an mp4 of exactly the
+  target length (uniform speed-up only if the take runs long). The Playwright
+  ffmpeg cannot write H.264, so encoding uses `ffmpeg-static` or Homebrew.
+- Take with `PROTOCOL_PERIOD_MS=500 SUSPECT_TIMEOUT_MS=1500`: kill → suspect
+  3.7 s, suspect → dead 3.1 s, revive → alive 1.8 s, 16.7 s total, played at
+  1.43× → `segment6-self-healing.mp4` (12.0 s, 415 KB). Frame is the dashboard
+  at 80 % zoom so strip, topology and Fleet rows all fit in 1080 lines. The
+  guide lists both compressions for the caption.
+- Local fleet restored to default timers afterwards; preflight GO. The VM got
+  the compose change and docs by rsync only (no restart; the new variables are
+  no-ops until set).
+
+### 2026-09-19 — Second demo clip: mock swarm engaged and neutralised
+
+- A swarm's responsible GCS is MAELSTROM on azure-vm (the chain sorts that
+  device first), so this Mac's console only offers a Command override. The
+  clip therefore records the VM's GCS console through an SSH tunnel while the
+  Mac's GCS launches the simulated swarm: `docs/video/segment6/record-swarm.mjs`
+  on a new shared `lib.mjs` (headless tab, screencast, drawn cursor, button
+  clicks, poll-until helpers).
+- Two throwaway takes taught the framing: an origin outside the default map
+  view draws nothing, and the GCS console fits 1080 lines at 1:1, so it is
+  recorded at 1920 × 1080 unscaled. Final origin is in the Strait south-west
+  of Changi with a 25 s time to impact.
+- Take at default timers: report → matchmade on the VM 1.1 s, Engage click →
+  engaging 1.3 s, Neutralised click → neutralised 0.6 s, 5/5 agree on every
+  device; 14.1 s played at 1.18× → `swarm-engage-neutralise.mp4` (12.0 s).
+- `encode.mjs` now ends a take at the recorder's "end" mark rather than the
+  last frame, since the screencast only emits on repaint.
+- Both fleets were restarted three times for clean track histories; preflight
+  rerun afterwards. The offline second Mac resurfaced from a lighthouse
+  registry in the final take (visible as `mac02 0/2`).
+
+### 2026-09-19 — Closing sequence assembled: both clips, captions, end card
+
+- `docs/video/segment6/build-closing.mjs` composites the self-healing and
+  swarm clips into `closing-sequence.mp4` (25.2 s): 0.3 s dissolve at 11.7 s,
+  the swarm's last frame held 1.5 s, timed caption overlays with alpha fades,
+  an amber focus ring on AEGIS, the end card fading in over the dimmed final
+  frame, and a fade to black. One ffmpeg filter graph; no editor needed.
+- Captions and the end card live in `overlays.html` (dashboard tokens, system
+  type); each layer is rendered to a transparent PNG by headless Chrome via a
+  new `png()`/`close()` in `lib.mjs`. Self-healing captions sit in the empty
+  timeline panel because the Fleet rows at the bottom carry the clicks; swarm
+  captions sit bottom-left where the GCS view draws nothing.
+- The end card's credits block is empty until `CREDITS` in `overlays.html` is
+  filled in (no team or mentor names exist in the repo). `endcard.png` is the
+  card alone.
+
 ## Verifying a build (checklist)
 
 ```sh

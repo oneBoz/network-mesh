@@ -1,0 +1,66 @@
+<!doctype html>
+<!-- Caption layers and the end card for the closing sequence, in the dashboard's own
+     tokens and type. build-closing.mjs renders each layer to a transparent PNG and
+     composites them over the two clips. Edit text here, then rerun the build.
+     Fill in CREDITS below for the end card (team, mentor, date). -->
+<meta charset="utf-8">
+<style>
+  :root { --bg:#0e141f; --panel:#151d2b; --edge:#26314a; --text:#e8edf4; --muted:#9aa7bd; --accent:#6fafff; --suspect:#f2b33d; --alive:#3dd9a4; }
+  html, body { margin:0; width:1920px; height:1080px; background:transparent; overflow:hidden;
+    font-family:-apple-system, "SF Pro Text", "SF Pro Display", system-ui, "Inter", sans-serif; -webkit-font-smoothing:antialiased; }
+  .layer { position:absolute; inset:0; }
+  .layer[hidden] { display:none; }
+  .card { position:absolute; display:inline-block; max-width:1240px; padding:14px 22px 16px; border-radius:12px;
+    background:rgba(21,29,43,.94); border:1px solid var(--edge); box-shadow:0 8px 28px rgba(0,0,0,.45); }
+  .card .eyebrow { font-size:15px; font-weight:500; letter-spacing:.06em; text-transform:uppercase; color:var(--muted); margin-bottom:6px; white-space:nowrap; }
+  .card .cap { font-size:27px; font-weight:600; color:var(--text); line-height:1.25; }
+  .card .cap b { color:var(--accent); font-weight:600; }
+  /* Self-healing clip: the engagement timeline panel is empty there, so captions sit inside it. */
+  .sh .card { left:1150px; top:600px; max-width:520px; }
+  /* Swarm clip: nothing is drawn below y≈890, so captions sit bottom-left. */
+  .sw .card { left:40px; top:930px; }
+  .ring { position:absolute; width:84px; height:84px; border-radius:50%; border:3px solid var(--suspect); opacity:.55;
+    left:calc(768px - 42px); top:calc(487px - 42px); box-shadow:0 0 18px rgba(242,179,61,.45); }
+  /* End card: dims the last frame and sits centred over it. */
+  .end { background:rgba(14,20,31,.88); display:flex; align-items:center; justify-content:center; }
+  .end .block { text-align:center; max-width:1300px; }
+  .end h1 { margin:0 0 14px; font-size:88px; font-weight:800; letter-spacing:.14em; color:var(--text); }
+  .end .rule { width:96px; height:3px; background:var(--accent); margin:0 auto 26px; border-radius:2px; }
+  .end .tag { font-size:32px; font-weight:500; color:var(--text); margin:0 0 18px; }
+  .end .proof { font-size:21px; color:var(--muted); margin:0 0 40px; letter-spacing:.01em; }
+  .end .credits { font-size:21px; color:var(--muted); line-height:1.7; }
+  .end .credits b { color:var(--text); font-weight:600; }
+</style>
+
+<div class="layer sh" id="sh1" hidden><div class="card"><div class="eyebrow">Self-healing mesh · simulated network</div><div class="cap">Healthy mesh · every node agrees <b>5/5</b></div></div></div>
+<div class="layer sh" id="sh2" hidden><div class="card"><div class="eyebrow">Self-healing mesh · simulated network</div><div class="cap">Node severed</div></div></div>
+<div class="layer sh" id="sh3" hidden><div class="card"><div class="eyebrow">Self-healing mesh · simulated network</div><div class="cap">Peers stop hearing it → <b>suspect</b></div></div></div>
+<div class="layer sh" id="sh4" hidden><div class="card"><div class="eyebrow">Self-healing mesh · simulated network</div><div class="cap">Convicted <b>dead</b> → out of the capability pool</div></div></div>
+<div class="layer sh" id="sh5" hidden><div class="card"><div class="eyebrow">Self-healing mesh · simulated network</div><div class="cap">Node rejoins</div></div></div>
+<div class="layer sh" id="sh6" hidden><div class="card"><div class="eyebrow">Self-healing mesh · simulated network</div><div class="cap">Rediscovered · same assignment as before</div></div></div>
+<div class="layer" id="ring" hidden><div class="ring"></div></div>
+
+<div class="layer sw" id="sw1" hidden><div class="card"><div class="eyebrow">Engagement lifecycle · simulated swarm</div><div class="cap">Same mesh, seen from the <b>Azure VM in Japan</b></div></div></div>
+<div class="layer sw" id="sw2" hidden><div class="card"><div class="eyebrow">Engagement lifecycle · simulated swarm</div><div class="cap">Swarm reported from the Mac · matchmade to this station</div></div></div>
+<div class="layer sw" id="sw3" hidden><div class="card"><div class="eyebrow">Engagement lifecycle · simulated swarm</div><div class="cap"><b>Engage</b></div></div></div>
+<div class="layer sw" id="sw4" hidden><div class="card"><div class="eyebrow">Engagement lifecycle · simulated swarm</div><div class="cap"><b>Neutralised</b></div></div></div>
+<div class="layer sw" id="sw5" hidden><div class="card"><div class="eyebrow">Engagement lifecycle · simulated swarm</div><div class="cap">Replicated to every device · <b>5/5 agree</b></div></div></div>
+
+<div class="layer end" id="end" hidden><div class="block">
+  <h1>MAELSTROM</h1>
+  <div class="rule"></div>
+  <p class="tag">A self-healing mesh for distributed air defence</p>
+  <p class="proof">5 nodes on 3 devices · no central server · SWIM gossip · AES-256-GCM · threats simulated</p>
+  <div class="credits" id="credits"></div>
+</div></div>
+
+<script>
+  // Fill these in: each entry is one line on the end card. Leave empty to omit the block.
+  const CREDITS = [
+    // "<b>Team</b> · Name One · Name Two · Name Three",
+    // "<b>Mentor</b> · Name",
+    // "SDT Hackathon · September 2026",
+  ];
+  document.getElementById("credits").innerHTML = CREDITS.join("<br>");
+  window.show = (id) => { for (const l of document.querySelectorAll(".layer")) l.hidden = l.id !== id; return !!document.getElementById(id); };
+</script>

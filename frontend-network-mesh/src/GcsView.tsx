@@ -1,26 +1,20 @@
 import { useEffect, useState } from "react";
 import { api } from "./api";
 import type { InboxMessage, MeshState, ScenarioInfo, ThreatAssignmentEvent, ThreatType } from "./types";
-import { deviceOf, systemLabel, systemName, systemOf } from "./defense";
-import { SignalRow, fmtTime } from "./SignalsPanel";
+import { deviceOf, systemName, systemOf } from "./defense";
+import { SignalRow } from "./SignalsPanel";
 import { groupRemotes } from "./remotes";
 import { MapPanel } from "./MapPanel";
 import { TrackBadge, TrackControls, isLiveTrack, trackFor } from "./Engagement";
+import { Field, PanelHead, Pill, THREAT_HINT, THREAT_LABEL, ThreatIcon, fmtTime } from "./ui";
 
 const SIM_THREATS: { type: ThreatType; label: string; eta: number }[] = [
-  { type: "missile", label: "🚀 missile", eta: 45_000 },
-  { type: "swarm", label: "🐝 swarm", eta: 120_000 },
-  { type: "aircraft", label: "✈️ aircraft", eta: 90_000 },
+  { type: "missile", label: "Missile", eta: 45_000 },
+  { type: "swarm", label: "Swarm", eta: 120_000 },
+  { type: "aircraft", label: "Aircraft", eta: 90_000 },
 ];
-
 const STATION_KEY = "mesh-gcs-station";
-const THREATS: { type: ThreatType; icon: string; hint: string }[] = [
-  { type: "missile", icon: "🚀", hint: "ballistic / cruise" },
-  { type: "swarm", icon: "🐝", hint: "drone swarm" },
-  { type: "aircraft", icon: "✈️", hint: "manned / large UAV" },
-  { type: "emp", icon: "⚡", hint: "electronic attack" },
-];
-const sysName = systemLabel;
+const THREATS: ThreatType[] = ["missile", "swarm", "aircraft", "emp"];
 
 /**
  * Ground Control Station mode. An operator names their station, reports a
@@ -29,18 +23,8 @@ const sysName = systemLabel;
  * with the actions taken, updating live without any coordination between
  * stations: each node ran the same deterministic matchmaking.
  */
-export function GcsView({
-  state,
-  activeThreat,
-  onError,
-}: {
-  state: MeshState;
-  activeThreat: ThreatAssignmentEvent | null;
-  onError: (m: string) => void;
-}) {
-  const [station, setStation] = useState(() => {
-    try { return localStorage.getItem(STATION_KEY) ?? ""; } catch { return ""; }
-  });
+export function GcsView({ state, activeThreat, onError }: { state: MeshState; activeThreat: ThreatAssignmentEvent | null; onError: (m: string) => void }) {
+  const [station, setStation] = useState(() => { try { return localStorage.getItem(STATION_KEY) ?? ""; } catch { return ""; } });
   const [note, setNote] = useState("");
   const [busy, setBusy] = useState<ThreatType | null>(null);
   const [lastSent, setLastSent] = useState<string | null>(null); // message id
@@ -52,9 +36,8 @@ export function GcsView({
   const targets = Object.entries(state.geo.entries).filter(([id]) => id !== state.device);
   const launch = async (origin: { lat: number; lng: number }) => {
     setPicking(false);
-    try {
-      await api.startSim({ threat: simThreat, origin, target: simTarget, etaMs: simEta, station: stationName });
-    } catch (e) { onError((e as Error).message); }
+    try { await api.startSim({ threat: simThreat, origin, target: simTarget, etaMs: simEta, station: stationName }); }
+    catch (e) { onError((e as Error).message); }
   };
   // Scripted scenarios (several launches against one target), listed by the control plane.
   const [scenarios, setScenarios] = useState<ScenarioInfo[]>([]);
@@ -75,17 +58,16 @@ export function GcsView({
 
   const defaultStation = state.device ? `GCS-${state.device}` : "GCS";
   const stationName = station.trim() || defaultStation;
-  useEffect(() => {
-    try { localStorage.setItem(STATION_KEY, station); } catch { /* ignore */ }
-  }, [station]);
+  useEffect(() => { try { localStorage.setItem(STATION_KEY, station); } catch { /* ignore */ } }, [station]);
 
   const liveNodes = state.procs.filter((p) => p.kind === "node" && p.running);
-  const aliveRemotes = state.remotes.filter((r) => r.status === "alive");
   const remoteDevices = groupRemotes(state.remotes);
+  const reachableDevices = remoteDevices.filter((d) => d.alive > 0).length;
   const signals = state.messages.filter((m) => m.kind === "gcs.signal" || m.kind === "track.detected");
   const myLive = state.tracks.filter((t) => isLiveTrack(t) && t.responsibleDevice === state.device);
   const latest: InboxMessage | undefined = signals.at(-1);
   const highlighted = activeThreat && latest && activeThreat.threatId === latest.id ? latest : latest;
+  const highlightedTrack = highlighted ? trackFor(state, highlighted.id) : undefined;
 
   const send = async (t: ThreatType) => {
     setBusy(t);
@@ -94,185 +76,169 @@ export function GcsView({
       setLastSent(m.id);
       setMyIds((prev) => new Set(prev).add(m.id));
       setNote("");
-    } catch (e) {
-      onError((e as Error).message);
-    } finally {
-      setBusy(null);
-    }
+    } catch (e) { onError((e as Error).message); } finally { setBusy(null); }
   };
+  const lastSentMsg = lastSent ? state.messages.find((x) => x.id === lastSent) : undefined;
 
   return (
-    <div className="gcs">
-      <div className="gcs-col">
-        <div className="panel gcs-station">
-          <h2>Ground control station</h2>
-          <div className="row" style={{ gap: 10 }}>
-            <label className="gcs-label">station</label>
-            <input size={16} value={station} placeholder={defaultStation}
-              onChange={(e) => setStation(e.target.value)} />
-            <span className="muted">on device <b style={{ color: "var(--text)" }}>{state.device || "…"}</b></span>
-          </div>
-          <div className="gcs-status">
-            <span><b>{liveNodes.length}</b> local nodes</span>
-            <span><b>{remoteDevices.length}</b> remote device{remoteDevices.length === 1 ? "" : "s"}
-              {remoteDevices.length > 0 && (
-                <span className="muted"> — {remoteDevices.map((d) => `${d.device} (${d.host}, ${d.alive}/${d.members.length} alive)`).join(" · ")}</span>
-              )}
-            </span>
-            <span><b>{signals.length}</b> signals on the mesh</span>
-            <span style={myLive.length ? { color: "var(--suspect)", fontWeight: 700 } : undefined}><b>{myLive.length}</b> target{myLive.length === 1 ? "" : "s"} waiting on this station</span>
-          </div>
+    <div className="stack">
+      <div className="strip" aria-label="Station status">
+        <div className="tile" style={{ "--stripe": "var(--accent)" } as React.CSSProperties}>
+          <span className="lbl">Station</span>
+          <Field label="Station name"><input id="gcs-station" value={station} placeholder={defaultStation} onChange={(e) => setStation(e.target.value)} /></Field>
+          <span className="det">on device {state.device || "…"}</span>
         </div>
-
-        <div className="panel">
-          <h2>Report a threat</h2>
-          <div className="gcs-threats">
-            {THREATS.map(({ type, icon, hint }) => (
-              <button key={type} className="gcs-threat" disabled={!!busy || !liveNodes.length}
-                onClick={() => send(type)} title={hint}>
-                <span className="gcs-threat-icon">{icon}</span>
-                <span className="gcs-threat-name">{type}</span>
-                <span className="gcs-threat-hint">{hint}</span>
-              </button>
-            ))}
-          </div>
-          <div className="row" style={{ marginTop: 8 }}>
-            <input style={{ flex: 1 }} placeholder="optional note, e.g. bearing 045 · 12 km · 3 contacts"
-              value={note} onChange={(e) => setNote(e.target.value)} />
-          </div>
-          {!liveNodes.length && (
-            <div className="muted" style={{ marginTop: 8, fontSize: 12 }}>
-              No local node is running — press <b>Boot demo mesh</b> first (a station sends through a local node).
-            </div>
-          )}
-          {lastSent && (
-            <div className="muted" style={{ marginTop: 8, fontSize: 12 }}>
-              last signal <code>{lastSent}</code> sent as <b>{stationName}</b>
-              {(() => {
-                const m = state.messages.find((x) => x.id === lastSent);
-                return m ? ` · received by ${m.seenBy.length} local node${m.seenBy.length === 1 ? "" : "s"}` : " · propagating…";
-              })()}
-            </div>
-          )}
+        <div className="tile" style={{ "--stripe": liveNodes.length ? "var(--alive)" : "var(--dead)" } as React.CSSProperties}>
+          <span className="lbl">Reachable</span>
+          <span className="val">{liveNodes.length}<small>local · {reachableDevices} remote device{reachableDevices === 1 ? "" : "s"}</small></span>
+          <span className="det">{remoteDevices.length ? remoteDevices.map((d) => `${d.device} ${d.alive}/${d.members.length}`).join(" · ") : "no remote devices yet"}</span>
         </div>
+        <div className="tile" style={{ "--stripe": myLive.length ? "var(--threat)" : "var(--muted)" } as React.CSSProperties}>
+          <span className="lbl">Waiting on this station</span>
+          <span className="val" style={myLive.length ? { color: "var(--threat)" } : undefined}>{myLive.length}<small>target{myLive.length === 1 ? "" : "s"}</small></span>
+          <span className="det">{myLive.length ? myLive.map((t) => `${t.threat}${t.positions.at(-1)?.eta !== undefined ? ` · ${Math.max(0, Math.round((t.positions.at(-1)!.eta ?? 0) / 1000))} s to impact` : ""}`).join(" · ") : "nothing waiting on you"}</span>
+        </div>
+        <div className="tile" style={{ "--stripe": "var(--accent)" } as React.CSSProperties}>
+          <span className="lbl">Signals on the mesh</span>
+          <span className="val">{signals.length}</span>
+          <span className="det">{latest ? `last from ${latest.from.station ?? latest.from.node} at ${fmtTime(latest.at)}` : "none yet"}</span>
+        </div>
+      </div>
 
-        <div className="panel">
-          <h2>Launch a simulated incoming target <span className="muted" style={{ fontWeight: 400, textTransform: "none", letterSpacing: 0 }}>· streams its trajectory to every device at 1 Hz</span></h2>
-          <div className="row" style={{ gap: 8 }}>
-            <select value={simThreat} onChange={(e) => { const t = e.target.value as ThreatType; setSimThreat(t); setSimEta(SIM_THREATS.find((x) => x.type === t)?.eta ?? 90_000); }}>
-              {SIM_THREATS.map((t) => <option key={t.type} value={t.type}>{t.label}</option>)}
-            </select>
-            <span className="muted">→</span>
-            <select value={simTarget} onChange={(e) => setSimTarget(e.target.value)}>
-              <option value="">target…</option>
-              {targets.map(([id, e]) => <option key={id} value={id}>{e.kind === "asset" ? "◆ " : "● "}{e.label ?? id}</option>)}
-            </select>
-            <span className="muted">impact in</span>
-            <select value={simEta} onChange={(e) => setSimEta(Number(e.target.value))}>
-              {[30_000, 45_000, 90_000, 180_000, 300_000].map((ms) => <option key={ms} value={ms}>{ms / 1000}s</option>)}
-            </select>
-            <button className={picking ? "primary" : undefined} disabled={!simTarget || state.sims.length >= 3 || !liveNodes.length}
-              onClick={() => setPicking((p) => !p)}>
-              {picking ? "click the map for the origin… (cancel)" : "▶ pick origin on map"}
-            </button>
+      <div className="gcs">
+        <div className="stack">
+          <div className="panel">
+            <PanelHead title="Report a threat" sub="every device matchmakes it independently" />
+            <div className="threats">
+              {THREATS.map((t) => (
+                <button key={t} type="button" className="threat-btn" disabled={!!busy || !liveNodes.length} onClick={() => send(t)}>
+                  <ThreatIcon type={t} /><span className="n">{THREAT_LABEL[t]}</span><span className="h">{THREAT_HINT[t]}</span>
+                </button>
+              ))}
+            </div>
+            <div className="row end" style={{ marginTop: 10 }}>
+              <Field label="Note (optional)" grow><input id="gcs-note" placeholder="e.g. bearing 045 · 12 km · 3 contacts" value={note} onChange={(e) => setNote(e.target.value)} /></Field>
+            </div>
+            {!liveNodes.length && <p className="empty">No local node is running — press <b>Boot demo mesh</b> first (a station sends through a local node).</p>}
+            {lastSent && (
+              <p className="muted small" style={{ marginTop: 8 }}>
+                last signal <span className="mono">{lastSent}</span> sent as <b>{stationName}</b>
+                {lastSentMsg ? ` · received by ${lastSentMsg.seenBy.length} local node${lastSentMsg.seenBy.length === 1 ? "" : "s"}` : " · propagating…"}
+              </p>
+            )}
           </div>
-          <div className="row" style={{ gap: 8, marginTop: 8 }}>
-            <span className="muted">or a scripted scenario:</span>
-            <select value={scenarioId} onChange={(e) => setScenarioId(e.target.value)} disabled={!scenarios.length}>
-              {scenarios.map((s) => <option key={s.id} value={s.id}>{s.name} · {s.steps.length} launch{s.steps.length === 1 ? "" : "es"}</option>)}
-            </select>
-            <button disabled={!scenarioId || !targets.length || !liveNodes.length} onClick={runScenario}
-              title={simTarget ? `runs against ${state.geo.entries[simTarget]?.label ?? simTarget}` : "runs against the first defended asset on the map (pick a target above to choose)"}>
-              ▶ run scenario
-            </button>
-          </div>
-          {scenario && <div className="muted" style={{ fontSize: 12, marginTop: 4 }}>{scenario.description}</div>}
-          {scenarioMsg && <div style={{ fontSize: 12, marginTop: 4, color: "var(--suspect)" }}>{scenarioMsg}</div>}
-          {!targets.length && <div className="muted" style={{ fontSize: 12, marginTop: 6 }}>No targets on the map yet — in Command mode place devices or defended assets, or press <b>seed Singapore demo layout</b>.</div>}
-          {state.sims.length > 0 && (
-            <div className="proc-list" style={{ marginTop: 8 }}>
-              {state.sims.map((s) => {
-                const t = trackFor(state, s.trackId);
-                return (
-                  <div className="proc" key={s.trackId}>
-                    <span className="dot" style={{ background: "var(--suspect)" }} />
-                    <span className="name">{s.threat}</span>
-                    <span className="meta">→ {state.geo.entries[s.target]?.label ?? s.target} · seq {s.seq} · {t ? `${t.state}, responsible ${t.responsibleDevice ?? "nobody"}` : "launching…"}</span>
-                    <button className="danger" onClick={() => api.cancelSim(s.trackId).catch((e: Error) => onError(e.message))}>cancel</button>
+
+          {highlighted && highlighted.assignment && (
+            <div className="panel">
+              <PanelHead title="Latest engagement"
+                sub={`${String(highlighted.body.threat)} · reported ${fmtTime(highlighted.at)} by ${highlighted.from.station ?? highlighted.from.node}${highlighted.from.device ? ` on ${highlighted.from.device}` : ""}`}
+                right={<Pill tone={highlighted.consistent ? "ok" : "bad"} title={highlighted.consistent
+                  ? `${highlighted.seenBy.length} local nodes computed this identical answer independently`
+                  : `${highlighted.agree} of ${highlighted.seenBy.length} local nodes computed this answer — the rest had a different view at that instant`}>
+                  {highlighted.agree}/{highlighted.seenBy.length} agree
+                </Pill>} />
+              {highlighted.assignment.primary ? (
+                <div className="engage">
+                  <div className="card primary">
+                    <span className="lbl">Engaging</span>
+                    <span className="big">{systemName(highlighted.assignment.primary)}</span>
+                    <span className="sub">{systemOf(highlighted.assignment.primary)?.layer ?? ""}{deviceOf(highlighted.assignment.primary) ? ` · on ${deviceOf(highlighted.assignment.primary)}` : ""}</span>
                   </div>
-                );
-              })}
-            </div>
-          )}
-        </div>
-
-        {highlighted && highlighted.assignment && (
-          <div className="panel gcs-engage">
-            <h2>Latest engagement</h2>
-            <div className="gcs-engage-head">
-              <span className="threat-tag" style={{ fontSize: 14, padding: "4px 10px" }}>
-                {String(highlighted.body.threat)}
-              </span>
-              <span className="muted">
-                reported {fmtTime(highlighted.at)} by <b style={{ color: "var(--text)" }}>{highlighted.from.station ?? highlighted.from.node}</b>
-                {highlighted.from.device && ` on ${highlighted.from.device}`}
-              </span>
-            </div>
-            {highlighted.assignment.primary ? (
-              <div className="gcs-engage-chain">
-                <div className="gcs-primary">
-                  <div className="gcs-primary-label">engaging</div>
-                  <div className="gcs-primary-name">{systemName(highlighted.assignment.primary)}</div>
-                  <div className="muted">
-                    {systemOf(highlighted.assignment.primary)?.layer ?? ""}
-                    {deviceOf(highlighted.assignment.primary) && <span className="gcs-device"> · on {deviceOf(highlighted.assignment.primary)}</span>}
-                  </div>
-                </div>
-                {highlighted.assignment.fallbacks.map((f, i) => (
-                  <div className="gcs-fallback" key={f}>
-                    <div className="gcs-primary-label">fallback {i + 1}</div>
-                    <div className="gcs-fallback-name">{systemName(f)}</div>
-                    <div className="muted">
-                      {systemOf(f)?.layer ?? ""}
-                      {deviceOf(f) && <span className="gcs-device"> · on {deviceOf(f)}</span>}
+                  {highlighted.assignment.fallbacks.slice(0, 2).map((f, i) => (
+                    <div className="card" key={f}>
+                      <span className="lbl">Fallback {i + 1}</span>
+                      <span className="mid">{systemName(f)}</span>
+                      <span className="sub">{systemOf(f)?.layer ?? ""}{deviceOf(f) ? ` · on ${deviceOf(f)}` : ""}</span>
                     </div>
-                  </div>
+                  ))}
+                </div>
+              ) : (
+                <p className="threat-leaked" style={{ fontSize: 16 }}>No coverage — threat leaked</p>
+              )}
+              {highlighted.assignment.fallbacks.length > 2 && (
+                <p className="muted small" style={{ marginTop: 6 }}>then {highlighted.assignment.fallbacks.slice(2).map((f) => systemName(f)).join(" → ")}</p>
+              )}
+              {highlightedTrack && (
+                <div className="lifecycle engage-actions">
+                  <TrackBadge t={highlightedTrack} state={state} />
+                  <TrackControls t={highlightedTrack} state={state} station={stationName} onError={onError} />
+                </div>
+              )}
+            </div>
+          )}
+
+          <div className="panel">
+            <PanelHead title="Launch a simulated target" sub="streams its trajectory to every device at 1 Hz" />
+            <div className="row end">
+              <Field label="Threat">
+                <select id="sim-threat" value={simThreat} onChange={(e) => { const t = e.target.value as ThreatType; setSimThreat(t); setSimEta(SIM_THREATS.find((x) => x.type === t)?.eta ?? 90_000); }}>
+                  {SIM_THREATS.map((t) => <option key={t.type} value={t.type}>{t.label}</option>)}
+                </select>
+              </Field>
+              <Field label="Target">
+                <select id="sim-target" value={simTarget} onChange={(e) => setSimTarget(e.target.value)}>
+                  <option value="">Choose…</option>
+                  {targets.map(([id, e]) => <option key={id} value={id}>{e.kind === "asset" ? "◆ " : "● "}{e.label ?? id}</option>)}
+                </select>
+              </Field>
+              <Field label="Time to impact">
+                <select id="sim-eta" value={simEta} onChange={(e) => setSimEta(Number(e.target.value))}>
+                  {[30_000, 45_000, 90_000, 180_000, 300_000].map((ms) => <option key={ms} value={ms}>{ms / 1000} s</option>)}
+                </select>
+              </Field>
+              <button type="button" className={`btn${picking ? "" : " primary"}`} aria-pressed={picking} disabled={!simTarget || state.sims.length >= 3 || !liveNodes.length}
+                onClick={() => setPicking((p) => !p)}>
+                {picking ? "Cancel picking" : "Pick origin on map"}
+              </button>
+            </div>
+            <div className="row end" style={{ marginTop: 10 }}>
+              <Field label="Or run a scripted scenario" grow>
+                <select id="sim-scenario" value={scenarioId} onChange={(e) => setScenarioId(e.target.value)} disabled={!scenarios.length}>
+                  {scenarios.map((s) => <option key={s.id} value={s.id}>{s.name} · {s.steps.length} launch{s.steps.length === 1 ? "" : "es"}</option>)}
+                </select>
+              </Field>
+              <button type="button" className="btn" disabled={!scenarioId || !targets.length || !liveNodes.length} onClick={runScenario}
+                title={simTarget ? `Runs against ${state.geo.entries[simTarget]?.label ?? simTarget}` : "Runs against the first defended asset on the map (pick a target above to choose)"}>
+                Run scenario
+              </button>
+            </div>
+            {scenario && <p className="muted small" style={{ marginTop: 6 }}>{scenario.description}</p>}
+            {scenarioMsg && <p className="small" style={{ marginTop: 4, color: "var(--suspect)" }}>{scenarioMsg}</p>}
+            {!targets.length && <p className="empty">No targets on the map yet — in Command mode place devices or defended assets, or press <b>Seed Singapore layout</b>.</p>}
+            {state.sims.length > 0 && (
+              <div className="list" style={{ marginTop: 8 }}>
+                {state.sims.map((s) => {
+                  const t = trackFor(state, s.trackId);
+                  return (
+                    <div className="item" key={s.trackId}>
+                      <span className="glyph" style={{ color: "var(--threat)" }}><ThreatIcon type={s.threat} /></span>
+                      <span className="nm">{THREAT_LABEL[s.threat]} → {state.geo.entries[s.target]?.label ?? s.target}<small>update {s.seq} · {t ? `${t.state}, responsible ${t.responsibleDevice ?? "nobody"}` : "launching…"}</small></span>
+                      <span className="acts"><button type="button" className="btn sm destructive" onClick={() => api.cancelSim(s.trackId).catch((e: Error) => onError(e.message))}>Cancel</button></span>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        </div>
+
+        <div className="stack">
+          <div className="panel">
+            <PanelHead title="Map" sub={picking ? "click to set the launch origin" : "Singapore · devices, assets, trajectories"} />
+            <MapPanel state={state} editable={false} height={320} pickOrigin={picking} onPickOrigin={launch} />
+          </div>
+          <div className="panel gcs-feed">
+            <PanelHead title="Signals on the mesh" sub="all stations, all devices"><Pill tone="info">live</Pill></PanelHead>
+            {signals.length ? (
+              <div className="signal-list">
+                {[...signals].reverse().map((m) => (
+                  <SignalRow key={m.id} m={m} state={state} mine={myIds.has(m.id)} station={stationName} onError={onError} />
                 ))}
               </div>
             ) : (
-              <b className="threat-leaked" style={{ fontSize: 16 }}>NO COVERAGE — THREAT LEAKED</b>
+              <p className="empty">Waiting for signals. Report a threat here, or from a GCS on any other device joined to the same lighthouse — it will appear here with the actions taken.</p>
             )}
-            {trackFor(state, highlighted.id) && (
-              <div className="signal-lifecycle" style={{ marginTop: 10 }}>
-                <TrackBadge t={trackFor(state, highlighted.id)!} state={state} />
-                <TrackControls t={trackFor(state, highlighted.id)!} state={state} station={stationName} onError={onError} />
-              </div>
-            )}
-            <div className="muted" style={{ fontSize: 12, marginTop: 6 }}>
-              {highlighted.consistent
-                ? `${highlighted.seenBy.length} local node${highlighted.seenBy.length === 1 ? "" : "s"} computed this identical answer independently`
-                : `${highlighted.agree} of ${highlighted.seenBy.length} local nodes computed this answer — the rest had a different view at that instant`}
-            </div>
           </div>
-        )}
-      </div>
-
-      <div className="gcs-col">
-        <MapPanel state={state} editable={false} height={340} pickOrigin={picking} onPickOrigin={launch} />
-        <div className="panel gcs-feed">
-          <h2>Signals on the mesh — all stations, all devices <span className="remote-tag">live</span></h2>
-          {signals.length ? (
-            <div className="signal-list">
-              {[...signals].reverse().map((m) => (
-                <SignalRow key={m.id} m={m} state={state} mine={myIds.has(m.id)} station={stationName} onError={onError} />
-              ))}
-            </div>
-          ) : (
-            <div className="muted" style={{ fontSize: 12 }}>
-              Waiting for signals. Report a threat here, or from a GCS on any other device joined to the same
-              lighthouse — it will appear here with the actions taken.
-            </div>
-          )}
         </div>
       </div>
     </div>
