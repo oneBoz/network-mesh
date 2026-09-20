@@ -7,6 +7,10 @@
  *     timeout → suspect; suspicion timeout → dead; every message piggybacks
  *     rumors + peer addresses so knowledge spreads epidemically.
  *   - Refute false rumors about itself by bumping its incarnation number.
+ *   - Forget the dead for good: a dead peer is pruned after DEAD_PRUNE_MS and
+ *     its id tombstoned, so a stale lighthouse registry or a slower neighbour
+ *     cannot re-seed it as "alive" — a re-offered address is probed first and
+ *     admitted only if it answers (see verify()).
  *   - Serve a tiny HTTP query API — the "Consul DNS" equivalent:
  *       GET /members            → this node's membership view
  *       GET /resolve/<service>  → healthy instances of a service
@@ -73,6 +77,8 @@ const INDIRECT_PROBES = 2; // helpers asked to probe on our behalf after a direc
 const INDIRECT_TIMEOUT_MS = envMs("INDIRECT_TIMEOUT_MS", PROFILE.indirect); // extra wait for a relayed ack before suspecting (two internet hops each way when the helper is a relay)
 const SUSPECT_TIMEOUT_MS = envMs("SUSPECT_TIMEOUT_MS", PROFILE.suspect); // base suspect → dead window; scaled up with mesh size
 const DEAD_PRUNE_MS = 30_000; // forget dead peers after this (bounds view + packet size)
+const FORGET_MS = 10 * 60_000; // a pruned id is re-admitted only on first-hand evidence for this long (see verify)
+const VERIFY_EVERY_MS = 10_000; // at most one verification probe per pruned id per this interval
 const ANNOUNCE_INTERVAL_MS = 30_000; // keepalive to lighthouses; the reply doubles as an anti-entropy refresh
 const REJOIN_MS = 10_000; // re-query lighthouses if our whole view has emptied
 const MAX_PIGGYBACK = 24; // peer records offered per packet before size trimming (see gossipPayload)
@@ -194,20 +200,22 @@ function handleMessage(msg: Message, rinfo: { address: string; port: number }): 
       const joiner: PeerInfo = observed(node, rinfo);
       membership.upsertPeer(joiner, true);
       const peers = trimToFit(
-        sample(membership.allPeers().filter((p) => p.id !== joiner.id), MAX_PIGGYBACK),
+        sample(membership.probeCandidates().filter((p) => p.id !== joiner.id), MAX_PIGGYBACK),
         (ps) => ({ type: "join-ack", from: self, peers: ps }), { fromBack: true });
       send(joiner, { type: "join-ack", from: self, peers });
       log(`answered join from ${joiner.id} (peer-assisted)`);
       break;
     }
     case "join-ack": {
-      const peers = Array.isArray(msg.peers) ? msg.peers : [];
-      for (const p of peers) membership.upsertPeer(p);
       // A peer (not a lighthouse) answered — it told us who it is, and this
       // packet came straight from it, so trust the observed address.
       if (msg.from && typeof msg.from.id === "string" && msg.from.id) {
         membership.upsertPeer(observed(msg.from, rinfo), true);
       }
+      // The list itself is hearsay: a lighthouse still hands out a node that
+      // died up to STALE_MS ago, so a recently pruned id is verified, not trusted.
+      const peers = Array.isArray(msg.peers) ? msg.peers : [];
+      for (const p of peers) learn(p);
       if (!joined) {
         joined = true; // even an empty mesh counts as joined
         log(`joined mesh — learned ${peers.length} peers`);
@@ -217,16 +225,19 @@ function handleMessage(msg: Message, rinfo: { address: string; port: number }): 
       break;
     }
     case "ping": {
-      absorb(msg.rumors, msg.peers);
+      // The sender first (first-hand), then what it piggybacked (hearsay).
       membership.upsertPeer(msg.from, true);
+      absorb(msg.rumors, msg.peers);
       send(msg.from, withGossip({ type: "ack", seq: msg.seq, from: self }));
       break;
     }
     case "ping-req": {
-      // Probe msg.target on msg.from's behalf; forward any ack we get.
-      absorb(msg.rumors, msg.peers);
+      // Probe msg.target on msg.from's behalf; forward any ack we get. The
+      // target is NOT entered into our view here — the requester asks because
+      // its own probe failed, so the target may well be dead; if it is up, its
+      // ack reaches us first-hand and admits it then.
       membership.upsertPeer(msg.from, true);
-      membership.upsertPeer(msg.target);
+      absorb(msg.rumors, msg.peers);
       // Prefer our own known address for the target over the requester's copy.
       const target = membership.peer(msg.target.id) ?? msg.target;
       const s = ++seq;
@@ -239,18 +250,21 @@ function handleMessage(msg: Message, rinfo: { address: string; port: number }): 
       break;
     }
     case "ack": {
+      // Only the node we actually probed may answer its probe.
+      const pending = pendingAcks.get(msg.seq);
+      const answered = !!pending && pending.target === msg.from.id;
+      // An answer to our own probe is first-hand evidence the node is up even
+      // when a helper relayed it (the address then stays what we already hold).
+      membership.upsertPeer(msg.from, !msg.relayed, !msg.relayed || answered);
       absorb(msg.rumors, msg.peers);
-      membership.upsertPeer(msg.from, !msg.relayed);
       // Were we probing this node for someone else? Forward the good news.
       const proxy = pendingProxies.get(msg.seq);
       if (proxy && proxy.targetId === msg.from.id) {
         pendingProxies.delete(msg.seq);
         send(proxy.origin, withGossip({ type: "ack", seq: proxy.originSeq, from: msg.from, relayed: true }));
       }
-      const pending = pendingAcks.get(msg.seq);
-      // Only the node we actually probed may answer its probe.
-      if (pending && pending.target === msg.from.id) {
-        clearTimeout(pending.timer);
+      if (answered) {
+        clearTimeout(pending!.timer);
         pendingAcks.delete(msg.seq);
         if (msg.relayed) noteRelayedAck(msg.from.id); else noteDirectAck(msg.from.id);
       }
@@ -436,8 +450,15 @@ function sample<T>(arr: T[], n: number): T[] {
 
 const VALID_STATUS = new Set(["alive", "suspect", "dead"]);
 
+/** Take a peer record from hearsay (a piggybacked or join-ack peer list): a new
+ *  id enters the view as alive and gets probed like anyone else; a recently
+ *  pruned id is verified by a probe instead of being trusted. */
+function learn(p: PeerInfo): void {
+  if (membership.upsertPeer(p) === "held") verify(p);
+}
+
 function absorb(rumors: Rumor[], peers: PeerInfo[]): void {
-  if (Array.isArray(peers)) for (const p of peers) membership.upsertPeer(p);
+  if (Array.isArray(peers)) for (const p of peers) learn(p);
   if (!Array.isArray(rumors)) return;
   for (const r of rumors) {
     // Skip structurally invalid rumors — they'd create phantom view entries.
@@ -450,9 +471,11 @@ function absorb(rumors: Rumor[], peers: PeerInfo[]): void {
 }
 
 /** Peer addresses to piggyback: a random sample (so every address still
- *  spreads over time) capped to keep the datagram small, plus always us. */
+ *  spreads over time) capped to keep the datagram small, plus always us.
+ *  Dead peers are left out: their addresses are useless, and passing them on
+ *  is exactly how a node that pruned the corpse would learn it "again". */
 function piggybackPeers(): PeerInfo[] {
-  return sample(membership.allPeers(), MAX_PIGGYBACK - 1).concat(self);
+  return sample(membership.probeCandidates(), MAX_PIGGYBACK - 1).concat(self);
 }
 
 /** Attach rumors + peer addresses to a gossip packet, sized so the datagram
@@ -513,18 +536,22 @@ function pathSummary(): Record<string, "direct" | "relay"> {
 let joined = false;
 let lastJoinAttempt = 0;
 let lastAnnounce = 0;
-/** Tell a lighthouse where we are now. Called on the 30 s timer and, rate
+/** Tell every lighthouse where we are now. Called on the 30 s timer and, rate
  *  limited, right after we refute a suspicion — a burst of suspicions usually
  *  means our NAT mapping changed (hotspot handover), and the lighthouse is how
- *  everyone else learns the new address quickly. */
+ *  everyone else learns the new address quickly.
+ *  Every lighthouse, not a random one: each keeps its own registry and drops a
+ *  node it has not heard from in STALE_MS, so with k lighthouses and one
+ *  announce per interval a live node vanished from any given registry
+ *  (1-1/k)^misses of the time — and each reply is the anti-entropy refresh, so
+ *  fleets on two sites re-merge after a partition within one interval. */
 function announce(reason?: string): void {
-  const lh = LIGHTHOUSES[Math.floor(Math.random() * LIGHTHOUSES.length)];
-  if (!lh) return;
+  if (!LIGHTHOUSES.length) return;
   const now = Date.now();
   if (reason && now - lastAnnounce < 5_000) return;
   lastAnnounce = now;
-  send(lh, { type: "announce", node: self, inc: membership.selfInc });
-  if (reason) log(`re-announced to ${lh.host}:${lh.port} (${reason})`);
+  for (const lh of LIGHTHOUSES) send(lh, { type: "announce", node: self, inc: membership.selfInc });
+  if (reason) log(`re-announced to ${LIGHTHOUSES.length} lighthouse${LIGHTHOUSES.length === 1 ? "" : "s"} (${reason})`);
 }
 
 // Last session's peer addresses (best effort — absent on first boot). Used
@@ -565,7 +592,7 @@ setInterval(() => announce(), ANNOUNCE_INTERVAL_MS);
 // nobody's direct probe ever meets a closed mapping.
 setInterval(() => {
   const keep: Message = { type: "keepalive", from: self };
-  for (const p of membership.allPeers()) {
+  for (const p of membership.probeCandidates()) {
     if (p.device === DEVICE) continue;
     send(p, keep);
   }
@@ -576,7 +603,8 @@ let tick = 0;
 function protocolTick(): void {
   scheduleTick(); // first, so no code path below can stall the loop
   tick++;
-  membership.sweep(suspectTimeoutMs(), DEAD_PRUNE_MS);
+  membership.sweep(suspectTimeoutMs(), DEAD_PRUNE_MS, FORGET_MS);
+  for (const id of paths.keys()) if (!membership.peer(id)) paths.delete(id);
 
   // Forget old threat ids so the dedupe map stays bounded.
   const threatCutoff = Date.now() - THREAT_SEEN_TTL_MS;
@@ -586,6 +614,10 @@ function protocolTick(): void {
   const msgCutoff = Date.now() - MSG_SEEN_TTL_MS;
   for (const [id, ts] of seenMsgs) {
     if (ts < msgCutoff) seenMsgs.delete(id);
+  }
+  const verifyCutoff = Date.now() - FORGET_MS;
+  for (const [id, ts] of lastVerify) {
+    if (ts < verifyCutoff) lastVerify.delete(id);
   }
   // Engagement lifecycle: escalate on dead/timeout, mark silent tracks lost.
   for (const t of tickLifecycle(engagement, lifecycleCtx())) {
@@ -619,6 +651,14 @@ function protocolTick(): void {
     return;
   }
   const target = candidates[Math.floor(Math.random() * candidates.length)];
+  probe(target, () => membership.markSuspect(target.id));
+}
+
+/** One SWIM probe of `target`: a direct ping, then (after ACK_TIMEOUT_MS, or
+ *  at once for a peer known to need a relay) ping-reqs through helpers; `onFail`
+ *  runs if nobody relays an ack within INDIRECT_TIMEOUT_MS. The ack handler
+ *  matches answers by seq and records the path that worked. */
+function probe(target: PeerInfo, onFail: () => void): void {
   const s = ++seq;
   const path = pathFor(target.id);
   const relayFirst = path.mode === "relay" && Date.now() - path.lastDirectTry < DIRECT_RETRY_MS;
@@ -627,14 +667,14 @@ function protocolTick(): void {
     send(target, withGossip({ type: "ping", seq: s, from: self }));
   }
   const indirect = () => {
-    // Direct probe failed (or is known to fail). Before suspecting, ask a few
+    // Direct probe failed (or is known to fail). Before giving up, ask a few
     // peers to try their path (SWIM's indirect probe) — one lossy link shouldn't
     // convict a node.
     if (!relayFirst) path.directFails++;
-    const helpers = candidates.filter((p) => p.id !== target.id);
+    const helpers = membership.probeCandidates().filter((p) => p.id !== target.id);
     if (!helpers.length) {
       pendingAcks.delete(s);
-      membership.markSuspect(target.id);
+      onFail();
       return;
     }
     // Mix the helpers so at least one of them can plausibly reach the target
@@ -656,7 +696,7 @@ function protocolTick(): void {
     }
     const indirectTimer = setTimeout(() => {
       pendingAcks.delete(s);
-      membership.markSuspect(target.id);
+      onFail();
     }, INDIRECT_TIMEOUT_MS);
     pendingAcks.set(s, { target: target.id, timer: indirectTimer });
   };
@@ -666,6 +706,22 @@ function protocolTick(): void {
     const timer = setTimeout(indirect, ACK_TIMEOUT_MS);
     pendingAcks.set(s, { target: target.id, timer });
   }
+}
+
+// ---------- verification of recently pruned peers ----------
+// A peer list naming a member we pruned is not taken at face value (see
+// Membership.tombstones): a lighthouse keeps a dead node registered for
+// STALE_MS after its last announce, and a neighbour may not have pruned it yet.
+// The offered address is probed instead — directly and through helpers — and
+// the node is admitted only when it answers (the ack handler treats an answer
+// to our probe as first-hand). A restarted or reconnected device is therefore
+// back within one probe; a dead one never flickers back.
+const lastVerify = new Map<string, number>();
+function verify(p: PeerInfo): void {
+  const now = Date.now();
+  if (now - (lastVerify.get(p.id) ?? 0) < VERIFY_EVERY_MS) return;
+  lastVerify.set(p.id, now);
+  probe(p, () => { /* still gone — nothing to change */ });
 }
 
 // ±10% jitter so a fleet booted together doesn't probe (and time out) in
@@ -776,7 +832,7 @@ createServer((req, res) => {
     serveThreat(res, url.slice("/engage/".length));
   } else if (url === "/members") {
     // Polled once a second per node by the control plane: compact, not pretty-printed.
-    res.end(JSON.stringify({ self: { ...self, host: selfHost, inc: membership.selfInc }, view: membership.snapshot(), paths: pathSummary(), profile: PROFILE_NAME }));
+    res.end(JSON.stringify({ self: { ...self, host: selfHost, inc: membership.selfInc }, view: membership.snapshot(), paths: pathSummary(), forgotten: membership.forgotten(), profile: PROFILE_NAME }));
   } else if (url.startsWith("/resolve/")) {
     const svc = url.slice("/resolve/".length);
     const healthy = membership.healthy(svc)

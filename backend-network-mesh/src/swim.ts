@@ -21,6 +21,14 @@ export interface MembershipEvent {
   to: NodeStatus;
 }
 
+/** What upsertPeer did with a record:
+ *  - "added": a new member entered the view (alive, incarnation 0);
+ *  - "updated": an existing member's record was refreshed;
+ *  - "held": the id was pruned recently and this was hearsay — nothing changed,
+ *    the caller should verify the address with a probe (see node.ts);
+ *  - "rejected": malformed, or our own id. */
+export type UpsertResult = "added" | "updated" | "held" | "rejected";
+
 export class Membership {
   readonly selfId: string;
   selfInc = 0;
@@ -29,6 +37,13 @@ export class Membership {
   // Times each member's rumor has been piggybacked since it last changed —
   // rumors() sends the least-gossiped first so a size cap still spreads news.
   private sends = new Map<string, number>();
+  // Members pruned after dying: id → { inc they died at, when pruned }. While an
+  // id is here, hearsay (a peer list from a lighthouse or another node) cannot
+  // re-admit it — only a packet from the node itself, or an ack to our own
+  // probe. Without this, a stale lighthouse registry or a slower neighbour
+  // re-seeds every pruned node as a fresh "alive" member, which is then
+  // re-suspected, re-convicted and re-pruned: a phantom that flaps forever.
+  private tombstones = new Map<string, { inc: number; at: number }>();
 
   private onChange?: (e: MembershipEvent) => void;
 
@@ -40,13 +55,21 @@ export class Membership {
   /** Learn (or refresh) a peer's address. Idempotent.
    *  Only a packet received directly from the peer itself (`direct`) may
    *  change a known address — relayed gossip can carry stale or wildcard
-   *  ("0.0.0.0") addresses observed by third parties. */
-  upsertPeer(info: PeerInfo, direct = false): void {
+   *  ("0.0.0.0") addresses observed by third parties.
+   *  `verified` (defaults to `direct`) says the record is first-hand evidence
+   *  that the node is up right now — it clears a tombstone. A relayed ack to
+   *  our own probe is verified but not direct: the node answered, but the
+   *  address in it is what the helper sees, not necessarily what we can reach. */
+  upsertPeer(info: PeerInfo, direct = false, verified = direct): UpsertResult {
     // Peers lists come off the wire — reject entries that lack a usable
     // identity or address rather than letting them pollute the view.
-    if (!info || typeof info.id !== "string" || !info.id) return;
-    if (typeof info.host !== "string" || typeof info.port !== "number") return;
-    if (info.id === this.selfId) return;
+    if (!info || typeof info.id !== "string" || !info.id) return "rejected";
+    if (typeof info.host !== "string" || typeof info.port !== "number") return "rejected";
+    if (info.id === this.selfId) return "rejected";
+    if (this.tombstones.has(info.id)) {
+      if (!verified) return "held";
+      this.tombstones.delete(info.id);
+    }
     const existing = this.peers.get(info.id);
     const wildcard = info.host === "0.0.0.0" || info.host === "";
     if (existing && (!direct || wildcard)) {
@@ -57,7 +80,21 @@ export class Membership {
     if (!this.view.has(info.id)) {
       this.view.set(info.id, { status: "alive", inc: 0, since: Date.now() });
       this.onChange?.({ id: info.id, from: "unknown", to: "alive" });
+      return "added";
     }
+    return "updated";
+  }
+
+  /** True while `id` was pruned recently and is admitted only on first-hand evidence. */
+  tombstoned(id: string): boolean {
+    return this.tombstones.has(id);
+  }
+
+  /** Recently pruned members: id → ms timestamp of the prune. */
+  forgotten(): Record<string, number> {
+    const out: Record<string, number> = {};
+    for (const [id, t] of this.tombstones) out[id] = t.at;
+    return out;
   }
 
   allPeers(): PeerInfo[] {
@@ -104,8 +141,10 @@ export class Membership {
   /** Age suspicions into deaths, and eventually forget the dead entirely.
    *  Call once per protocol period. Dead entries linger for `pruneDeadAfterMs`
    *  so the death rumor still propagates, then are dropped — otherwise the
-   *  view (and every piggybacked rumor set) grows without bound under churn. */
-  sweep(suspectTimeoutMs: number, pruneDeadAfterMs = Infinity): void {
+   *  view (and every piggybacked rumor set) grows without bound under churn.
+   *  A pruned id is tombstoned for `forgetMs`: until then it re-enters the
+   *  view only on first-hand evidence (see upsertPeer), never on hearsay. */
+  sweep(suspectTimeoutMs: number, pruneDeadAfterMs = Infinity, forgetMs = Infinity): void {
     const now = Date.now();
     for (const [id, e] of this.view) {
       if (e.status === "suspect" && now - e.since > suspectTimeoutMs) {
@@ -114,7 +153,11 @@ export class Membership {
         this.view.delete(id);
         this.peers.delete(id);
         this.sends.delete(id);
+        this.tombstones.set(id, { inc: e.inc, at: now });
       }
+    }
+    for (const [id, t] of this.tombstones) {
+      if (now - t.at > forgetMs) this.tombstones.delete(id);
     }
   }
 
@@ -140,7 +183,10 @@ export class Membership {
     for (const r of sent) if (r.id !== this.selfId) this.sends.set(r.id, (this.sends.get(r.id) ?? 0) + 1);
   }
 
-  /** Peers we might productively probe (not known-dead). */
+  /** Peers we might productively probe (not known-dead). Also the only peers
+   *  whose addresses we pass on: a dead peer's record is gossiped by nobody, so
+   *  once every node has convicted it, nothing can re-seed it into a node that
+   *  has already pruned it. */
   probeCandidates(): PeerInfo[] {
     return this.allPeers().filter((p) => this.view.get(p.id)?.status !== "dead");
   }
@@ -179,7 +225,13 @@ export class Membership {
 
   private transition(id: string, r: Rumor): boolean {
     const cur = this.view.get(id);
-    if (cur && !supersedes(r, cur)) return false;
+    // A rumor about a member we do not know is ignored (as in memberlist): a
+    // member enters the view only with an address, via upsertPeer. Otherwise a
+    // neighbour that has not pruned a dead node yet re-creates it here with a
+    // fresh timestamp, we gossip it back after it prunes — and the pair keeps
+    // the corpse alive between them indefinitely.
+    if (!cur) return false;
+    if (!supersedes(r, cur)) return false;
     const from = cur?.status ?? "unknown";
     this.view.set(id, { status: r.status, inc: r.inc, since: Date.now() });
     this.sends.set(id, 0); // fresh news — gossip it with priority

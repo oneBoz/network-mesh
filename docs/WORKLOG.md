@@ -521,6 +521,62 @@ feature and endpoint is reachable from the new layout.
   filled in (no team or mentor names exist in the repo). `endcard.png` is the
   card alone.
 
+### 2026-09-20 — Membership: the dead stay forgotten, registries stay complete
+
+Found while looking at why an offline device resurfaced in the final video
+take. Reproduced on loopback (lighthouse + 3 nodes, one killed): the corpse was
+never forgotten. Every 30 s the survivors pruned it and re-learned it within
+2 ms (`unknown → alive`, `alive → dead`), restarting the prune timer — for as
+long as the run lasted. Three causes, all fixed in `swim.ts` / `node.ts`:
+
+- **Rumor ping-pong.** A rumor about an unknown id created a view entry, so
+  a neighbour that had not pruned yet re-created the corpse (fresh timestamp)
+  in a node that had, which gossiped it back after the neighbour pruned. Now a
+  rumor about an unknown member is ignored (memberlist's rule): members enter
+  the view only with an address, via `upsertPeer`.
+- **Dead addresses in the gossip.** Piggybacked peer lists, join answers and
+  NAT keepalives included dead peers; a pruned node took the record as a new
+  "alive" member, probed it, re-convicted it. They now carry live peers only.
+- **Stale lighthouse registries.** A lighthouse hands out a node for
+  `STALE_MS` (2 min) after its last announce, and every announce reply is
+  absorbed as a peer list — the phantom seen in the video (`mac02 0/2`).
+  Pruned ids are now **tombstoned** (`FORGET_MS`, 10 min): hearsay about one
+  returns `"held"` from `upsertPeer` and the node runs a `verify()` probe of
+  the offered address instead (direct, then through helpers, rate limited to
+  one per id per 10 s). Only first-hand evidence re-admits: a packet from the
+  node itself, or an ack — direct or relayed — to our own probe. A restarted
+  or reconnected device is back within a probe; a dead one never flickers.
+  `ping-req` no longer enters the target into the view either (the requester
+  asks because its own probe failed). `/members` gained `forgotten`.
+- **Announces go to every lighthouse**, not a random one. With the demo's 4
+  lighthouses (3 local + Azure) each registry heard from a node with
+  probability 1/4 per 30 s, so a live node was missing from any given registry
+  (3/4)^4 ≈ 32 % of the time (dashboard registry counts flickered, and a
+  cross-site merge after a partition waited ~2 min on average for the right
+  lighthouse to be picked). Now one interval.
+
+New `test/swim.test.ts` (5 tests: unknown rumors ignored, upsert results,
+prune → tombstone → held/re-admit, tombstone expiry, two-node convergence).
+Loopback re-run after the fix (kill at +0, lighthouse still listing the node
+for the whole run): dead at +10 s, pruned at +41 s, `ABSENT tombstoned` on
+both survivors from then on with no further transitions; the node restarted at
++82 s was alive on both by +84 s. Each survivor logged exactly one
+alive → suspect → dead cycle and one `unknown → alive` on the restart. Not backward compatible in behaviour only (wire format unchanged): a
+device on an older build still re-seeds phantoms into its own view, so rebuild
+every device.
+
+Deployed 2026-09-20 09:00 SGT on the Mac (`docker compose up -d --build`) and
+the Azure VM (rsync + host-network `up -d --build`); both fleets rebooted.
+Smoke PASS from the Mac with three devices in the mesh (dingyi-mac, azure-vm,
+vk-mac), `5/5` on the signal and the track. The Mac's three registries now
+each list all five local nodes (before: 4, 2, 3). The `mac02` phantoms that
+had been showing as dead remotes for a day are gone. One boot-time false
+conviction of `wisl-azure-vm` (VM fleet mid-boot) was refuted within 1.4 s,
+the known transient. `vk-mac` still runs the previous build: its nodes announce
+to one random lighthouse, so it is intermittently missing from the VM's public
+registry until it rebuilds. README gained a step-by-step Apple Silicon setup
+and an "Updating a device to a new build" section with the Mac and VM commands.
+
 ## Verifying a build (checklist)
 
 ```sh

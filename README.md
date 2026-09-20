@@ -17,6 +17,122 @@ real mesh processes and shows the fleet converge.
 
 ---
 
+## Set up a fresh Apple Silicon Mac, step by step
+
+Everything runs in one Docker container; nothing else is installed on the Mac.
+Ten minutes on a clean machine, most of it the first image build.
+
+1. **Install Docker Desktop.** Download the *Apple Silicon* build from
+   https://www.docker.com/products/docker-desktop/, drag it to Applications
+   and open it once (accept the service agreement, no sign-in needed). Leave
+   it running: the whale icon in the menu bar must say *Docker Desktop is
+   running*. Rosetta is not required; the image is built for arm64.
+   Check from Terminal:
+
+   ```sh
+   docker --version            # Docker version 27 or later
+   docker compose version      # Docker Compose version v2.x
+   ```
+
+2. **Get the repository.** Either download the ZIP from GitHub and unzip it,
+   or clone it. The first `git` command on a clean Mac offers to install the
+   Command Line Tools; accept, it is the only prompt.
+
+   ```sh
+   git clone https://github.com/oneBoz/network-mesh.git
+   cd network-mesh
+   ```
+
+3. **Create `.env`.** Copy the template and edit three lines:
+
+   ```sh
+   cp .env.example .env
+   open -e .env                # or any editor
+   ```
+
+   | Line | Set it to |
+   |---|---|
+   | `MESH_KEY=` | The mesh's key, copied from an existing device's `.env` over a private channel. For a purely local demo any string works. |
+   | `DEVICE_NAME=` | A short unique name for this Mac, letters, digits and hyphens: `mini-a`, `gcs-laptop`. It suffixes this Mac's node ids on every dashboard. |
+   | `EXTRA_LIGHTHOUSES=` | Leave empty for a self-contained demo. To join the internet mesh, the public lighthouse: `<vps public ip>:5001`. If another Mac is on the same Wi-Fi, add its LAN address too: `192.168.0.14:5001,<vps public ip>:5001` (find a Mac's LAN address with `ipconfig getifaddr en0`). |
+
+4. **Build and start.**
+
+   ```sh
+   docker compose up -d --build
+   ```
+
+   The first build downloads the Node base image and compiles the dashboard
+   and the mesh, 2 to 4 minutes on an M-series Mac. Later starts take a few
+   seconds. `docker compose ps` should show `network-mesh` as `healthy` within
+   half a minute. If macOS asks whether Docker may accept incoming network
+   connections, click **Allow**: that is the UDP ports other devices use to
+   reach this Mac's nodes.
+
+5. **Boot the fleet.** Open **http://localhost:7070** (not 7000, which macOS
+   AirPlay owns) and press **Boot demo**. Within about five seconds the
+   topology shows three lighthouses and five nodes, all green, and the
+   convergence matrix is fully green. Section *What you should see* below
+   walks through the threat ladder.
+
+6. **Check the other devices, if you set `EXTRA_LIGHTHOUSES`.** The header
+   gains an `n/m remote · internet` counter within about 30 seconds, and the
+   fleet panel lists each other device with its nodes alive. Switch to
+   **Lighthouse** mode: each local lighthouse's registry should list this Mac's
+   five nodes plus every remote node that announced to it. Send a GCS signal
+   from either side; both feeds show it with `5/5 agree`.
+
+7. **Optional: run the checks from the terminal.** These scripts need Node 22
+   or 24 on the Mac (the official `.pkg` from https://nodejs.org, macOS ARM64);
+   the dashboard itself does not.
+
+   ```sh
+   node scripts/smoke.mjs                                  # converges, fires 4 threats, PASS
+   node scripts/preflight.mjs --expect <remote device name> # GO / NO-GO before a demo
+   ```
+
+Day-to-day:
+
+```sh
+docker compose down             # stop everything; the map's location table survives in the volume
+docker compose up -d            # start again (no rebuild)
+docker compose logs -f          # follow every lighthouse and node log line
+docker compose down -v          # stop and also wipe the persisted location table
+```
+
+### Updating a device to a new build
+
+Every device must run the same build: the wire format is versioned, and a
+device left on an older build can still show phantoms of devices that went
+offline. Rebuilding takes about a minute after the first time; the running
+fleet is restarted, so do it between demos.
+
+On a Mac (or any machine with the repository cloned):
+
+```sh
+cd network-mesh && git pull
+docker compose up -d --build
+curl -s -X POST 127.0.0.1:7070/api/demo      # or press Boot demo
+```
+
+On the Azure VM, which was populated with `rsync` rather than `git`, push the
+working tree from the Mac and rebuild with the host-network override:
+
+```sh
+rsync -az --delete --exclude node_modules --exclude .git --exclude dist --exclude .env \
+  --exclude docs/video -e "ssh -i ~/.ssh/id_rsa" ./ azureuser@<vps public ip>:~/network-mesh/
+ssh -i ~/.ssh/id_rsa azureuser@<vps public ip> \
+  'cd ~/network-mesh && ADVERTISE=<vps public ip> DEVICE_NAME=azure-vm sudo -E docker compose \
+     -p mesh-dashboard -f docker-compose.yml -f docker-compose.host.yml up -d --build \
+   && curl -s -X POST 127.0.0.1:7070/api/demo'
+```
+
+The VM's `.env` (key, device name) stays in place because it is excluded from
+the sync. Boot the fleets on both sides, wait about 30 seconds, then confirm
+in each dashboard that the other device is alive and a signal reaches both.
+
+---
+
 ## Run it (Docker, recommended)
 
 Requirements: Docker Desktop 4.x or later with Compose v2 (`docker compose`).

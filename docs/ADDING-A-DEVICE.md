@@ -114,8 +114,9 @@ curl -s -X POST 127.0.0.1:7070/api/demo
 `ADVERTISE`/`PUBLIC_IP` is mandatory here: a node that joins a lighthouse on
 its own machine over loopback would otherwise be recorded as `127.0.0.1`.
 Other devices then add `<its ip>:5001` to their `EXTRA_LIGHTHOUSES`. Several
-public lighthouses can be listed; nodes announce to a random one every 30 s and
-re-learn peers from the reply.
+public lighthouses can be listed; nodes announce to every one of them every
+30 s and re-learn peers from each reply, so every registry stays complete and
+two sites re-merge within one interval after a partition.
 
 ## 4. Check that it worked
 
@@ -143,6 +144,7 @@ curl -s -X POST localhost:7070/api/signal -H 'content-type: application/json' \
 | Symptom | Cause / fix |
 |---|---|
 | Header shows no remotes after 30 s | `MESH_KEY` differs (nodes log `authentication failed`), the other device runs a pre-encryption build (`unknown frame version`), `EXTRA_LIGHTHOUSES` typo, or outbound UDP blocked. `docker compose logs -f` and look for `joined mesh — learned N peers` on each node. |
+| A removed device keeps reappearing as dead (or flashes alive then dead every 30 s) | The observing device runs a build older than 2026-09-20: dead peers were re-seeded by gossip and by lighthouse registries. `docker compose up -d --build` there. |
 | Remote nodes flicker between alive and suspect | Two devices behind the same router using public addresses — use section 2. Or the other device runs an older build — `docker compose up -d --build` there. |
 | `id conflict` in a lighthouse log | Two devices with the same `DEVICE_NAME` (or a device booted with no `EXTRA_LIGHTHOUSES`, giving plain ids that collide with a hub's). Make names unique. |
 | `timestamp outside the replay window` | Clocks differ by more than 60 s. Enable NTP on both machines. |
@@ -153,3 +155,10 @@ curl -s -X POST localhost:7070/api/signal -H 'content-type: application/json' \
 
 Just `docker compose down` on it. Others mark its nodes suspect within a
 second, dead after ~5-10 s, and forget them 30 s later. Nothing else changes.
+
+Forgotten means forgotten: a lighthouse still lists the device for up to two
+minutes after its last announce, but a node that has pruned an id no longer
+takes it back on hearsay — it probes the offered address and admits the device
+only if it answers. So a removed device does not resurface as a phantom, and a
+device that comes back (same name, same or new address) is alive again on
+every dashboard within a probe or two.

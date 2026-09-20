@@ -1,0 +1,274 @@
+<title>Maelstrom Architecture</title>
+<style>
+  :root {
+    --bg: #0e141f; --panel: #151d2b; --well: #101826; --edge: #26314a; --ctrl: #5b6a86;
+    --text: #e8edf4; --muted: #9aa7bd; --alive: #3dd9a4; --suspect: #f2b33d; --dead: #f47174;
+    --accent: #6fafff; --lh: #afa3fb; --threat: #ee86cb;
+    --font: -apple-system, "SF Pro Text", system-ui, "Segoe UI", Roboto, Inter, sans-serif;
+    --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  }
+  html { color-scheme: dark; }
+  body { margin: 0; background: var(--bg); color: var(--text); font-family: var(--font); font-size: 16px; line-height: 1.5;
+    padding-block: 32px 64px; padding-inline: 20px; -webkit-font-smoothing: antialiased; }
+  .wrap { max-width: 1040px; margin: 0 auto; }
+  h1, h2, h3 { margin: 0; text-wrap: balance; }
+  h1 { font-size: 34px; font-weight: 800; letter-spacing: .1em; }
+  h1 small { display: block; font-size: 15px; font-weight: 500; letter-spacing: 0; color: var(--muted); margin-top: 6px; }
+  h2 { font-size: 22px; font-weight: 700; margin-bottom: 8px; }
+  h2 .n { display: inline-block; min-width: 28px; height: 28px; line-height: 28px; text-align: center; border-radius: 8px;
+    background: var(--well); border: 1px solid var(--edge); color: var(--accent); font-size: 14px; font-variant-numeric: tabular-nums; margin-right: 10px; vertical-align: 2px; }
+  p { margin: 0 0 12px; max-width: 70ch; }
+  p.lead { color: var(--muted); font-size: 17px; max-width: 64ch; }
+  section { margin-top: 44px; }
+  .eyebrow { font-size: 12px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); margin-bottom: 8px; }
+
+  /* Diagram */
+  .diagram { display: grid; grid-template-columns: 1fr auto 1fr; gap: 14px; align-items: stretch; margin-top: 18px; }
+  .device { background: var(--panel); border: 1px solid var(--edge); border-radius: 14px; padding: 16px; display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+  .device header { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+  .device header b { font-size: 16px; }
+  .device header span { font-family: var(--mono); font-size: 12px; color: var(--muted); }
+  .box { background: var(--well); border: 1px solid var(--edge); border-radius: 10px; padding: 10px 12px; }
+  .box b { display: block; font-size: 14px; }
+  .box small { display: block; color: var(--muted); font-size: 12.5px; line-height: 1.4; }
+  .box.dash { border-left: 3px solid var(--accent); }
+  .box.ctl { border-left: 3px solid var(--muted); }
+  .link { text-align: center; color: var(--muted); font-size: 12px; letter-spacing: .04em; }
+  .link.v::before { content: "▲ "; }
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; }
+  .chip { font-family: var(--mono); font-size: 12px; padding: 4px 8px; border-radius: 999px; border: 1px solid var(--edge); background: var(--bg); white-space: nowrap; }
+  .chip.lh { color: var(--lh); border-color: color-mix(in srgb, var(--lh) 40%, var(--edge)); }
+  .chip.node { color: var(--alive); border-color: color-mix(in srgb, var(--alive) 40%, var(--edge)); }
+  .between { display: flex; flex-direction: column; justify-content: center; align-items: center; gap: 6px; color: var(--muted); font-size: 12px; text-align: center; padding: 0 4px; }
+  .between .arrow { font-size: 26px; color: var(--accent); line-height: 1; }
+  .between .tag { font-family: var(--mono); font-size: 11px; padding: 3px 8px; border-radius: 999px; border: 1px solid var(--edge); background: var(--well); white-space: nowrap; }
+  .third { margin-top: 12px; background: var(--panel); border: 1px dashed var(--edge); border-radius: 12px; padding: 12px 16px; color: var(--muted); font-size: 14px; display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+  .third b { color: var(--text); }
+  .legend { display: flex; gap: 16px; flex-wrap: wrap; margin-top: 12px; font-size: 13px; color: var(--muted); }
+  .legend i { display: inline-block; width: 10px; height: 10px; border-radius: 3px; margin-right: 6px; vertical-align: -1px; }
+
+  /* Layers */
+  .layer { background: var(--panel); border: 1px solid var(--edge); border-radius: 14px; padding: 20px 22px; margin-top: 14px; }
+  .layer .kv { display: grid; grid-template-columns: max-content 1fr; gap: 6px 16px; margin-top: 12px; font-size: 14.5px; }
+  .layer .kv dt { color: var(--muted); font-weight: 500; }
+  .layer .kv dd { margin: 0; }
+  .layer.mesh { border-top: 3px solid var(--alive); }
+  .layer.app { border-top: 3px solid var(--threat); }
+  .layer.plane { border-top: 3px solid var(--accent); }
+
+  /* Steps */
+  ol.steps { list-style: none; padding: 0; margin: 14px 0 0; counter-reset: s; display: grid; gap: 10px; }
+  ol.steps li { counter-increment: s; display: grid; grid-template-columns: 34px 1fr; gap: 12px; align-items: start; background: var(--panel); border: 1px solid var(--edge); border-radius: 12px; padding: 12px 14px; }
+  ol.steps li::before { content: counter(s); width: 28px; height: 28px; line-height: 28px; text-align: center; border-radius: 8px; background: var(--well); border: 1px solid var(--edge); color: var(--accent); font-size: 13px; font-weight: 600; font-variant-numeric: tabular-nums; }
+  ol.steps li b { display: block; font-size: 15px; }
+  ol.steps li span { color: var(--muted); font-size: 14px; }
+  .pill { display: inline-block; font-size: 12px; font-weight: 600; padding: 2px 9px; border-radius: 999px; border: 1px solid transparent; }
+  .pill.ok { color: var(--alive); background: rgba(61,217,164,.12); border-color: rgba(61,217,164,.35); }
+  .pill.warn { color: var(--suspect); background: rgba(242,179,61,.12); border-color: rgba(242,179,61,.35); }
+  .pill.bad { color: var(--dead); background: rgba(244,113,116,.12); border-color: rgba(244,113,116,.35); }
+
+  /* Real vs simulated */
+  .two { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-top: 14px; }
+  .two .col { background: var(--panel); border: 1px solid var(--edge); border-radius: 14px; padding: 18px 20px; }
+  .two h3 { font-size: 15px; margin-bottom: 8px; }
+  .two ul { margin: 0; padding-left: 18px; color: var(--muted); font-size: 14.5px; }
+  .two ul li { margin: 4px 0; }
+  .two ul li b { color: var(--text); font-weight: 600; }
+
+  /* Report text */
+  .report { border-top: 1px solid var(--edge); padding-top: 32px; }
+  .report article { margin-top: 28px; }
+  .report article h2 { font-size: 20px; margin-bottom: 10px; }
+  .report p { max-width: 74ch; font-size: 15.5px; }
+  .report p b { color: var(--text); }
+  .tablewrap { overflow-x: auto; margin: 6px 0 14px; }
+  .report table { border-collapse: collapse; font-size: 14.5px; min-width: 460px; }
+  .report th, .report td { text-align: left; padding: 8px 14px 8px 0; border-bottom: 1px solid var(--edge); }
+  .report th { color: var(--muted); font-weight: 600; font-size: 12.5px; letter-spacing: .04em; text-transform: uppercase; }
+  .report td:nth-child(n+3) { font-variant-numeric: tabular-nums; }
+  ul.caps { margin: 0; padding-left: 20px; max-width: 74ch; }
+  ul.caps li { margin: 8px 0; font-size: 15px; color: var(--muted); }
+  ul.caps li b { color: var(--text); }
+  footer { margin-top: 44px; color: var(--muted); font-size: 13px; border-top: 1px solid var(--edge); padding-top: 14px; }
+  code { font-family: var(--mono); font-size: .9em; color: var(--text); background: var(--well); padding: 1px 5px; border-radius: 5px; }
+
+  @media (max-width: 720px) {
+    .diagram { grid-template-columns: 1fr; }
+    .between { flex-direction: row; padding: 4px 0; }
+    .between .arrow { transform: rotate(90deg); }
+    .two { grid-template-columns: 1fr; }
+    .layer .kv { grid-template-columns: 1fr; gap: 2px 0; }
+    .layer .kv dt { margin-top: 8px; }
+    h1 { font-size: 28px; }
+  }
+  @media (prefers-reduced-motion: no-preference) { a { transition: color .15s; } }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+</style>
+
+<div class="wrap">
+  <h1>MAELSTROM<small>A self-healing mesh for distributed air defence, in three layers: the gossip mesh, the decisions replicated on top of it, and the demo control plane that shows both.</small></h1>
+
+  <section>
+    <div class="eyebrow">One picture</div>
+    <div class="diagram">
+      <div class="device">
+        <header><b>Device A · a Mac</b><span>dingyi-mac · behind NAT</span></header>
+        <div class="box dash"><b>Dashboard</b><small>React · Command, GCS and Lighthouse views · state pushed over server-sent events</small></div>
+        <div class="link v">state patches at 1 Hz</div>
+        <div class="box ctl"><b>Control plane</b><small>one container · spawns the processes below, polls their query APIs, owns the simulator and the location table</small></div>
+        <div class="link v">spawn · poll</div>
+        <div class="box"><b>Lighthouses</b><small>join brokers only</small><div class="chips" style="margin-top:6px"><span class="chip lh">lh-5001</span><span class="chip lh">lh-5002</span><span class="chip lh">lh-5003</span></div></div>
+        <div class="box"><b>Nodes</b><small>one per weapon system, each a UDP process</small><div class="chips" style="margin-top:6px"><span class="chip node">MAELSTROM</span><span class="chip node">AEGIS</span><span class="chip node">SmartFalcon</span><span class="chip node">EdgeFuse</span><span class="chip node">WISL</span></div></div>
+      </div>
+      <div class="between">
+        <span class="tag">UDP gossip</span>
+        <span class="arrow">⟷</span>
+        <span class="tag">AES-256-GCM</span>
+        <span>peer to peer<br>NAT hole punching<br>+ keepalives</span>
+      </div>
+      <div class="device">
+        <header><b>Device B · Azure VM</b><span>azure-vm · public IP · Japan</span></header>
+        <div class="box dash"><b>Dashboard</b><small>identical build · this device's own view of the same mesh</small></div>
+        <div class="link v">state patches at 1 Hz</div>
+        <div class="box ctl"><b>Control plane</b><small>identical · this one advertises its public address</small></div>
+        <div class="link v">spawn · poll</div>
+        <div class="box"><b>Lighthouses</b><small>every device's nodes also join this one, so the fleets merge</small><div class="chips" style="margin-top:6px"><span class="chip lh">lh-5001</span><span class="chip lh">lh-5002</span><span class="chip lh">lh-5003</span></div></div>
+        <div class="box"><b>Nodes</b><small>same five systems, same code</small><div class="chips" style="margin-top:6px"><span class="chip node">MAELSTROM</span><span class="chip node">AEGIS</span><span class="chip node">SmartFalcon</span><span class="chip node">EdgeFuse</span><span class="chip node">WISL</span></div></div>
+      </div>
+    </div>
+    <div class="third"><b>Any further device</b> runs the same container, points at the public lighthouse, and joins the same mesh. In the demo a third Mac does exactly that.</div>
+    <div class="legend"><span><i style="background:var(--lh)"></i>lighthouse</span><span><i style="background:var(--alive)"></i>node</span><span><i style="background:var(--accent)"></i>dashboard</span><span><i style="background:var(--muted)"></i>control plane</span></div>
+  </section>
+
+  <section>
+    <div class="eyebrow">Three layers, from the wire up</div>
+
+    <div class="layer mesh">
+      <h2><span class="n">1</span>The mesh</h2>
+      <p>Every node is a small UDP process. Lighthouses are join brokers only: a node announces to them, learns who else is out there, and from then on talks peer to peer. There is no central member table and no broadcast.</p>
+      <dl class="kv">
+        <dt>Failure detection</dt><dd>SWIM. Each node probes one random peer per second. If the direct probe times out it asks two helpers to probe on its behalf, then marks the peer <span class="pill warn">suspect</span> and convicts it <span class="pill bad">dead</span> after a window that grows with mesh size. A wrongly accused node refutes with a higher incarnation number and comes back <span class="pill ok">alive</span>.</dd>
+        <dt>Spread</dt><dd>Rumours ride piggybacked on the probes, so news about a peer reaches everyone in a few gossip rounds without extra traffic.</dd>
+        <dt>Across the internet</dt><dd>NAT hole punching with keepalives; a node that cannot reach a peer directly probes it through a helper that can. The VM advertises its public address.</dd>
+        <dt>Confidentiality</dt><dd>Every frame is AES-256-GCM, keyed from the shared secret by HKDF. A device without the key cannot join or read.</dd>
+      </dl>
+    </div>
+
+    <div class="layer app">
+      <h2><span class="n">2</span>The decisions on top</h2>
+      <p>The same gossip channel floods application messages, deduplicated by id: a threat report from a ground control station, a track's position each second, engage, hand over, neutralised. Nothing is decided centrally.</p>
+      <dl class="kv">
+        <dt>Matchmaking</dt><dd>Each node runs the identical deterministic matchmaker over its own view of who is alive, so every node independently arrives at the same responsible system and the same fallback chain. A dead node simply drops out of everyone's chain.</dd>
+        <dt>Engagement lifecycle</dt><dd>Each node applies the same reducer to the same messages, so track state is replicated everywhere. Only the responsible device's engage and neutralise are accepted; anyone else's are recorded as rejected.</dd>
+        <dt>Why "5/5 agree" means something</dt><dd>The dashboard is comparing five independent answers from five processes, not reading one source.</dd>
+      </dl>
+    </div>
+
+    <div class="layer plane">
+      <h2><span class="n">3</span>The control plane and dashboard</h2>
+      <p>One container per device is the demo harness. It spawns the local lighthouses and nodes as child processes, polls their small HTTP query APIs once a second, and pushes only the slices that changed to the browser. It also owns everything that is simulated.</p>
+      <dl class="kv">
+        <dt>Command view</dt><dd>Map or topology of what the mesh believes, fleet controls (kill, revive, add), engagement timeline, agreement across nodes.</dd>
+        <dt>GCS view</dt><dd>Report a threat, see the latest engagement and its chain, engage and neutralise what this station owns, launch a simulated target.</dd>
+        <dt>Lighthouse view</dt><dd>The registries: who has announced to which broker.</dd>
+      </dl>
+    </div>
+  </section>
+
+  <section>
+    <div class="eyebrow">One message, end to end</div>
+    <p class="lead">A ground control station on the Mac launches a simulated drone swarm toward Changi.</p>
+    <ol class="steps">
+      <li><b>The Mac's control plane hands the report to one local node.</b><span>That node floods it over the encrypted gossip channel; the simulator starts streaming the swarm's position once a second the same way.</span></li>
+      <li><b>Within about a second every node on every device has it.</b><span>Each one matchmakes independently and reaches the same answer: MAELSTROM Command on the Azure VM, then a fallback chain across the other devices.</span></li>
+      <li><b>The VM's GCS console lights up "waiting on this station".</b><span>The Mac's console shows the same track with "waiting on azure-vm". Both are reading their own nodes.</span></li>
+      <li><b>The operator on the VM clicks Engage, then Neutralised.</b><span>Each click is one message from a VM node. Every reducer accepts it because the VM is the responsible device.</span></li>
+      <li><b>Every device shows neutralised, by GCS-azure-vm, 5/5 agree.</b><span>No one told a server; the state converged because every node ran the same code over the same messages.</span></li>
+    </ol>
+  </section>
+
+  <section>
+    <div class="eyebrow">What is real and what is simulated</div>
+    <div class="two">
+      <div class="col">
+        <h3><span class="pill ok">Real</span></h3>
+        <ul>
+          <li><b>The processes</b>: 5 nodes and 3 lighthouses per device, killable and revivable live.</li>
+          <li><b>The gossip</b>: probes, suspicion, conviction and refutation as they happen.</li>
+          <li><b>The internet path</b> between Singapore and Japan, through NAT.</li>
+          <li><b>The encryption</b> on every frame.</li>
+          <li><b>The replicated decisions</b>: matchmaking and the engagement lifecycle.</li>
+        </ul>
+      </div>
+      <div class="col">
+        <h3><span class="pill warn">Simulated</span></h3>
+        <ul>
+          <li><b>Threats</b>: reported by an operator or a scripted scenario.</li>
+          <li><b>Trajectories</b>: a simulator drives each launched target toward its asset.</li>
+          <li><b>Assets and device positions</b>: a location table placed on the map.</li>
+          <li><b>The weapon systems</b>: each node stands in for one; nothing is fired.</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <section class="report">
+    <div class="eyebrow">Report text · section 3.6</div>
+    <p class="lead">Copy-ready prose for the combined report. The same text is saved in the repository as <code>docs/report-section-3.6.md</code>.</p>
+
+    <article>
+      <h2>3.6 MAELSTROM Command</h2>
+      <p>MAELSTROM Command is the command-and-control layer of the combined defence: a self-healing mesh that connects every partner system into one entity with no central server. Each defence system, whether it runs on the same machine or on another continent, is represented by a lightweight node in the mesh. The nodes discover each other, detect failures in seconds, agree independently on which system should answer a threat, and replicate the engagement from first report to neutralisation on every device. MAELSTROM also fields the Layer 1 anti-swarm effector, which takes part in the same orchestration as every partner system. The whole stack is written in TypeScript on Node.js built-ins, with a React dashboard, and ships as one Docker image that any device can run.</p>
+    </article>
+
+    <article>
+      <h2>3.6.1 Architecture Overview</h2>
+      <p>The system is layered in three parts.</p>
+      <p><b>The mesh.</b> Every node is a small UDP process. Lighthouses act as join brokers only: a node announces itself to them, learns who else is present, and from then on communicates peer to peer. Membership uses the SWIM protocol: each node probes one random peer every second, asks two helpers to probe on its behalf if the direct probe times out, then marks the peer <em>suspect</em> and convicts it <em>dead</em> after a window that grows with the size of the mesh. A wrongly accused node refutes the accusation with a higher incarnation number. Rumours about members ride on the probes themselves, so there is no broadcast and no central member table. Nodes on different networks reach each other through NAT hole punching with keepalives, and a node that cannot reach a peer directly probes it through a helper that can. Every frame is encrypted with AES-256-GCM under a key derived from a shared secret; a device without the key can neither join nor read.</p>
+      <p><b>The decisions on top.</b> The same gossip channel floods application messages, deduplicated by id: threat reports from ground control stations, track positions once per second, and the engage, hand-over and neutralised actions. Nothing is decided centrally. Each node runs the identical deterministic matchmaker over its own view of who is alive, and each node applies the identical engagement reducer to the same messages, so both the assignment and the engagement state are replicated on every device without a coordination round trip.</p>
+      <p><b>The control plane and dashboard.</b> One container per device spawns the local lighthouses and nodes as child processes, polls their small HTTP query interfaces once a second, and pushes only the changed state to the browser over server-sent events. It also owns everything that is simulated in the demonstration: the location table, the trajectory simulator and the scripted scenarios. The dashboard offers a Command view (map or topology of what the mesh believes, fleet controls, engagement timeline, cross-node agreement), a GCS view (report a threat, engage and neutralise what this station owns, launch a simulated target) and a Lighthouse view (the join registries).</p>
+      <p>In the demonstration configuration each device runs three lighthouses and five nodes, one per defence system. Every device's nodes also join a lighthouse on a public Azure virtual machine in Japan, so fleets on separate networks merge into one mesh.</p>
+    </article>
+
+    <article>
+      <h2>3.6.2 Capability-Aware Orchestration</h2>
+      <p>Every node carries a capability declaration: the threat types it can engage, the defence layer it belongs to, and a relative cost of using it. The declarations used in the demonstration are:</p>
+      <div class="tablewrap"><table>
+        <thead><tr><th>System</th><th>Engages</th><th>Layer</th><th>Cost</th></tr></thead>
+        <tbody>
+          <tr><td>MAELSTROM (Layer 1 anti-swarm)</td><td>swarm</td><td>1</td><td>8</td></tr>
+          <tr><td>AEGIS</td><td>missile, aircraft</td><td>2</td><td>5</td></tr>
+          <tr><td>SmartFalcon</td><td>missile, aircraft</td><td>3</td><td>5</td></tr>
+          <tr><td>EdgeFuse</td><td>missile, aircraft, swarm</td><td>4</td><td>6</td></tr>
+          <tr><td>WISL</td><td>EMP, swarm</td><td>5</td><td>2</td></tr>
+        </tbody>
+      </table></div>
+      <p>When a threat is reported, every node matchmakes it independently: filter the currently alive nodes to those whose declaration covers the threat type, then order them by layer, then cost, then identifier. Because the ordering is total and the input is each node's converged membership view, every node computes the identical primary and the identical fallback chain. The mesh therefore acts as one entity with no leader election and no negotiation. A missile, for example, resolves to AEGIS first, then SmartFalcon, then EdgeFuse; a swarm resolves to MAELSTROM's Layer 1 effector first, then EdgeFuse, then WISL.</p>
+      <p>Escalation is not a separate mechanism. If the primary system's node is convicted dead, it simply disappears from the alive filter, and the next matchmake returns the fallback. Conversely, when a node rejoins, it is rediscovered within one probe cycle and resumes its position in the chain. Responsibility is enforced by the same rule at the engagement level: only the device that currently holds the primary may engage or neutralise a track, and an action from anyone else is recorded as rejected on every node. A Command operator may override this, and the override is logged as such.</p>
+      <p>Because the same code runs on every node, the mesh's answer can be audited: the dashboard shows the assignment as computed by each local node and reports how many of them agree, which in a converged mesh is all of them.</p>
+    </article>
+
+    <article>
+      <h2>3.6.3 Integration with Partner Teams</h2>
+      <p>Each partner system integrates by running one MAELSTROM node alongside its own software. The node needs a service name, a capability declaration, the shared mesh key and the address of at least one lighthouse; from there it joins the mesh, is discovered by every other node, and is placed in every fallback chain it qualifies for. In the demonstration the five systems, AEGIS (Layer 2, close-combat interception), SmartFalcon (Layer 3, interception if AEGIS fails), EdgeFuse (Layer 4, on-sensor fused detection for counter-swarm), WISL (EMP defence and jamming) and MAELSTROM's own Layer 1 effector, are represented by nodes with those declarations on each device.</p>
+      <p>Partner software talks to its node over a local, token-protected HTTP interface rather than to the mesh directly. It can originate a message that the node floods to every member, report a threat and receive the mesh's assignment, read the current membership with each peer's status, read the replicated track table with each track's state and responsible device, and check the node's health. Assignments and engagement events also arrive at every node as the mesh floods them, so a partner system learns that it has been made responsible for a track from its own node, not from a central server.</p>
+      <p>The message vocabulary is small and fixed: a ground-control signal, a threat assignment, and the track lifecycle events detected, update, engaging, hand-over, neutralised, lost and impact. Any station on any device may report; only the responsible device's actions are accepted.</p>
+      <p>In this hackathon the partner systems were represented by their nodes and declarations rather than by live hardware; connecting a real effector means pointing its control software at the local node interface.</p>
+    </article>
+
+    <article>
+      <h2>3.6.4 Demonstrated Capabilities</h2>
+      <p>The following were shown live during development and are reproducible with the scripts in the repository.</p>
+      <ul class="caps">
+        <li><b>Self-healing membership across the internet.</b> A mesh of fifteen nodes on three devices, a MacBook in Singapore, a second Mac, and an Azure virtual machine in Japan, joined through a public lighthouse, with peers behind NAT reached by hole punching. Killing a node's process is noticed by its peers within a few seconds, convicted after the suspect window, and the node is rediscovered within a probe cycle of being revived.</li>
+        <li><b>Encryption end to end.</b> Every gossip and application frame is AES-256-GCM; the lighthouses report the encryption state and the pre-demo check refuses to run without it.</li>
+        <li><b>One-entity decisions.</b> Threat reports injected from any node produce the identical assignment and fallback chain on every node, verified by comparing all local nodes' answers (5 of 5 in every check). When the primary's node is killed, the next report resolves to the fallback with no other change; when it is revived, the assignment returns to the original.</li>
+        <li><b>Replicated engagement lifecycle.</b> A simulated drone swarm reported from the Mac was matchmade to MAELSTROM on the Azure VM within about one second, engaged and neutralised from the VM's ground-control console, and every device showed the same state with all nodes in agreement. Attempts from a non-responsible device are rejected and logged.</li>
+        <li><b>Simulated tracks at 1 Hz.</b> Launched targets stream their trajectory to every device once a second, and scripted scenarios (single cruise missile, two swarm waves, saturation attack, aircraft probe) exercise the chain end to end.</li>
+        <li><b>Operational readiness.</b> A judging-day preflight script checks the dashboard, fleet, encryption, local convergence, remote devices, map layout, map tiles and cross-node signal agreement, and reports GO or NO-GO with the reason. Container memory per device is about 285 MB for the full fleet, and the dashboard receives only changed state slices, so it stays responsive on a projector laptop.</li>
+      </ul>
+    </article>
+  </section>
+
+  <footer>Built in TypeScript on Node built-ins for the mesh, React and Leaflet for the dashboard, one Docker image per device. Timers, ports and the shared key come from a single environment file.</footer>
+</div>

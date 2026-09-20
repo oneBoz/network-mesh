@@ -1,0 +1,168 @@
+<!doctype html>
+<!-- One figure per report subsection (3.6 … 3.6.4), 1600×900 each, light background for print.
+     render.mjs shows each figure in turn and saves it at 2× as fig-<id>.png. Edit text here, rerun. -->
+<meta charset="utf-8">
+<style>
+  :root { --bg:#ffffff; --panel:#f3f6fb; --well:#e9eef7; --edge:#cbd5e4; --text:#0e141f; --muted:#5b6a86;
+    --accent:#2f6fd6; --alive:#139a6e; --suspect:#c98a12; --dead:#d5484c; --lh:#6f5fd6; --threat:#c4479a; }
+  html, body { margin:0; width:1600px; height:900px; background:var(--bg); color:var(--text); overflow:hidden;
+    font-family:-apple-system, "SF Pro Text", "SF Pro Display", system-ui, "Inter", sans-serif; -webkit-font-smoothing:antialiased; }
+  .fig { position:absolute; inset:0; padding:56px 72px; box-sizing:border-box; }
+  .fig[hidden] { display:none; }
+  .fig h1 { margin:0; font-size:34px; font-weight:700; letter-spacing:-.01em; }
+  .fig h1 small { display:block; font-size:19px; font-weight:400; color:var(--muted); margin-top:6px; letter-spacing:0; }
+  .num { display:inline-block; font-variant-numeric:tabular-nums; color:var(--accent); margin-right:12px; }
+  .foot { position:absolute; left:72px; right:72px; bottom:44px; display:flex; justify-content:space-between; align-items:center;
+    font-size:17px; color:var(--muted); border-top:1px solid var(--edge); padding-top:14px; }
+  .foot b { color:var(--text); font-weight:600; white-space:nowrap; margin-left:28px; }
+  svg text { font-family:inherit; }
+  .box { position:absolute; background:var(--panel); border:1.5px solid var(--edge); border-radius:16px; padding:18px 22px; box-sizing:border-box; }
+  .box h2 { margin:0 0 6px; font-size:22px; font-weight:700; }
+  .box p { margin:0; font-size:17px; color:var(--muted); line-height:1.4; }
+  .chip { display:inline-block; font-size:15.5px; padding:6px 12px; border-radius:999px; border:1.5px solid var(--edge); background:var(--bg); margin:4px 6px 0 0; white-space:nowrap; }
+  .chip.k { color:var(--accent); border-color:var(--accent); }
+  .pill { display:inline-block; font-size:15px; font-weight:600; padding:3px 10px; border-radius:999px; }
+  .pill.ok { color:var(--alive); background:#dff5ec; } .pill.bad { color:var(--dead); background:#fbe3e4; } .pill.warn { color:var(--suspect); background:#fbefd5; }
+
+  /* 3.6.1 layers */
+  .band { position:absolute; left:72px; right:72px; height:170px; border-radius:16px; border:1.5px solid var(--edge); background:var(--panel); display:grid; grid-template-columns:330px 1fr; align-items:center; padding:0 26px; box-sizing:border-box; }
+  .band .t { font-size:24px; font-weight:700; } .band .t small { display:block; font-size:16px; font-weight:400; color:var(--muted); margin-top:4px; }
+  .band .cells { display:flex; gap:14px; }
+  .cell { flex:1; background:var(--bg); border:1.5px solid var(--edge); border-radius:12px; padding:12px 14px; min-height:96px; box-sizing:border-box; }
+  .cell b { display:block; font-size:17px; margin-bottom:3px; } .cell span { font-size:15px; color:var(--muted); line-height:1.35; display:block; }
+  .band.l3 { border-left:6px solid var(--accent); } .band.l2 { border-left:6px solid var(--threat); } .band.l1 { border-left:6px solid var(--alive); }
+
+  /* 3.6.2 pipeline */
+  .row { position:absolute; left:72px; right:72px; height:230px; display:grid; grid-template-columns:150px 40px 1fr 40px 300px 40px 1fr; align-items:center; gap:0; }
+  .row .lbl { font-size:19px; font-weight:700; }
+  .row .lbl small { display:block; font-weight:400; color:var(--muted); font-size:15px; margin-top:4px; }
+  .arrow { text-align:center; color:var(--accent); font-size:30px; }
+  .stage { background:var(--panel); border:1.5px solid var(--edge); border-radius:14px; padding:12px 14px; height:190px; box-sizing:border-box; }
+  .stage h3 { margin:0 0 8px; font-size:16px; color:var(--muted); font-weight:600; text-transform:uppercase; letter-spacing:.04em; }
+  .nodes { display:flex; flex-wrap:wrap; gap:8px; }
+  .nd { display:inline-flex; align-items:center; gap:8px; font-size:15.5px; padding:6px 10px; border-radius:10px; background:var(--bg); border:1.5px solid var(--edge); }
+  .nd i { width:12px; height:12px; border-radius:50%; background:var(--alive); display:inline-block; }
+  .nd.dead { color:var(--muted); text-decoration:line-through; } .nd.dead i { background:var(--dead); }
+  .nd.out { opacity:.35; }
+  .nd small { color:var(--muted); font-size:13px; }
+  .chain { display:flex; align-items:center; gap:10px; flex-wrap:wrap; font-size:18px; font-weight:600; }
+  .chain .c { padding:8px 12px; border-radius:10px; border:1.5px solid var(--edge); background:var(--bg); }
+  .chain .c.primary { border-color:var(--accent); color:var(--accent); }
+  .chain .sep { color:var(--muted); }
+
+  /* 3.6.3 integration */
+  .api { list-style:none; margin:10px 0 0; padding:0; }
+  .api li { font-size:15.5px; margin:4px 0; color:var(--muted); } .api li code { font-family:ui-monospace, "SF Mono", Menlo, monospace; color:var(--text); background:var(--bg); padding:1px 6px; border-radius:6px; font-size:14px; }
+
+  /* 3.6.4 tiles */
+  .tiles { position:absolute; left:72px; right:72px; top:150px; display:grid; grid-template-columns:repeat(3,1fr); gap:18px; }
+  .tile { background:var(--panel); border:1.5px solid var(--edge); border-radius:16px; padding:20px 22px; height:280px; box-sizing:border-box; }
+  .tile .ic { width:56px; height:56px; margin-bottom:12px; }
+  .tile b { display:block; font-size:21px; margin-bottom:6px; }
+  .tile p { margin:0; font-size:16.5px; color:var(--muted); line-height:1.4; }
+  .tile .m { display:inline-block; margin-top:10px; font-size:15px; font-weight:600; color:var(--accent); }
+</style>
+
+<!-- 3.6 MAELSTROM Command: one entity -->
+<div class="fig" id="3.6" hidden>
+  <h1><span class="num">3.6</span>MAELSTROM Command<small>One entity: every partner system is a node in a self-healing mesh. No central server, no leader.</small></h1>
+  <svg viewBox="0 0 1600 900" width="1600" height="900" style="position:absolute;inset:0">
+    <g stroke="#cbd5e4" stroke-width="2">
+      <line x1="800" y1="230" x2="1047" y2="410"/><line x1="800" y1="230" x2="953" y2="700"/><line x1="800" y1="230" x2="647" y2="700"/><line x1="800" y1="230" x2="553" y2="410"/>
+      <line x1="1047" y1="410" x2="953" y2="700"/><line x1="1047" y1="410" x2="647" y2="700"/><line x1="1047" y1="410" x2="553" y2="410"/>
+      <line x1="953" y1="700" x2="647" y2="700"/><line x1="953" y1="700" x2="553" y2="410"/><line x1="647" y1="700" x2="553" y2="410"/>
+    </g>
+    <g stroke="#2f6fd6" stroke-width="3" stroke-dasharray="6 8" fill="none"><line x1="800" y1="230" x2="1047" y2="410"/><line x1="1047" y1="410" x2="647" y2="700"/></g>
+    <g font-size="14" fill="#2f6fd6" font-weight="600"><text x="945" y="300" transform="rotate(36 945 300)">probe · ack</text><text x="815" y="540" transform="rotate(-36 815 540)">rumour</text></g>
+    <!-- crossed-out central server -->
+    <g transform="translate(800 470)">
+      <rect x="-92" y="-36" width="184" height="72" rx="12" fill="#ffffff" stroke="#cbd5e4" stroke-width="2" stroke-dasharray="8 6"/>
+      <text text-anchor="middle" y="-4" font-size="15" fill="#5b6a86">central server</text>
+      <text text-anchor="middle" y="18" font-size="13" fill="#5b6a86">none</text>
+      <line x1="-70" y1="-30" x2="70" y2="30" stroke="#d5484c" stroke-width="3"/>
+    </g>
+    <!-- nodes -->
+    <g font-weight="700" font-size="17" text-anchor="middle">
+      <g transform="translate(800 230)"><circle r="46" fill="#dff5ec" stroke="#139a6e" stroke-width="4"/><text y="-2" fill="#0e141f">MAEL</text><text y="18" font-size="12" font-weight="500" fill="#5b6a86">Layer 1</text><text y="-62" font-size="16" fill="#0e141f">MAELSTROM · anti-swarm</text></g>
+      <g transform="translate(1047 410)"><circle r="46" fill="#dff5ec" stroke="#139a6e" stroke-width="4"/><text y="-2" fill="#0e141f">AEGIS</text><text y="18" font-size="12" font-weight="500" fill="#5b6a86">Layer 2</text><text x="60" y="6" text-anchor="start" font-size="16">AEGIS · interception</text></g>
+      <g transform="translate(953 700)"><circle r="46" fill="#dff5ec" stroke="#139a6e" stroke-width="4"/><text y="-2" fill="#0e141f">FALCON</text><text y="18" font-size="12" font-weight="500" fill="#5b6a86">Layer 3</text><text y="72" font-size="16">SmartFalcon · backup interception</text></g>
+      <g transform="translate(647 700)"><circle r="46" fill="#dff5ec" stroke="#139a6e" stroke-width="4"/><text y="-2" fill="#0e141f">EDGE</text><text y="18" font-size="12" font-weight="500" fill="#5b6a86">Layer 4</text><text y="72" font-size="16">EdgeFuse · fused detection</text></g>
+      <g transform="translate(553 410)"><circle r="46" fill="#dff5ec" stroke="#139a6e" stroke-width="4"/><text y="-2" fill="#0e141f">WISL</text><text y="18" font-size="12" font-weight="500" fill="#5b6a86">EMP</text><text x="-60" y="6" text-anchor="end" font-size="16">WISL · EMP defence</text></g>
+    </g>
+    <!-- device brackets -->
+    <g font-size="15" fill="#5b6a86"><text x="1240" y="300" font-weight="600">Runs on any device</text><text x="1240" y="326">a Mac, a second Mac,</text><text x="1240" y="350">an Azure VM in Japan…</text><text x="1240" y="374">same container, same code</text></g>
+    <g font-size="15" fill="#5b6a86"><text x="150" y="560" font-weight="600">Between nodes</text><text x="150" y="586">UDP gossip · SWIM</text><text x="150" y="610">AES-256-GCM on every frame</text><text x="150" y="634">NAT hole punching</text></g>
+  </svg>
+  <div class="foot"><span>A node that dies is convicted by its peers in seconds and drops out of every decision; when it returns it is rediscovered within a probe cycle.</span><b>self-healing · peer to peer</b></div>
+</div>
+
+<!-- 3.6.1 architecture: three layers -->
+<div class="fig" id="3.6.1" hidden>
+  <h1><span class="num">3.6.1</span>Architecture overview<small>Three layers on every device. The mesh carries everything; decisions are replicated on top; the control plane only shows and simulates.</small></h1>
+  <div class="band l3" style="top:170px"><div class="t">3 · Control plane &amp; dashboard<small>one container per device · the demo harness</small></div>
+    <div class="cells"><div class="cell"><b>Spawns &amp; polls</b><span>3 lighthouses + 5 nodes as child processes, queried once a second</span></div><div class="cell"><b>Pushes state</b><span>only changed slices, over server-sent events</span></div><div class="cell"><b>Owns the simulation</b><span>location table, trajectory simulator, scripted scenarios</span></div><div class="cell"><b>Three views</b><span>Command · GCS · Lighthouse</span></div></div></div>
+  <div class="band l2" style="top:360px"><div class="t">2 · Decisions<small>the same code on every node, no leader</small></div>
+    <div class="cells"><div class="cell"><b>Flooded messages</b><span>threat reports, track positions, engage, hand over, neutralised</span></div><div class="cell"><b>Deterministic matchmaking</b><span>each node picks the same responsible system from its own alive view</span></div><div class="cell"><b>Engagement reducer</b><span>identical state on every device; only the responsible device may act</span></div><div class="cell"><b>Auditable</b><span>dashboard compares every node's answer: 5/5 agree</span></div></div></div>
+  <div class="band l1" style="top:550px"><div class="t">1 · Mesh<small>small UDP processes, peer to peer</small></div>
+    <div class="cells"><div class="cell"><b>Lighthouses</b><span>join brokers only; a public one on the Azure VM merges fleets</span></div><div class="cell"><b>SWIM membership</b><span>probe → indirect probe → suspect → dead; refutation by incarnation</span></div><div class="cell"><b>Across NAT</b><span>hole punching, keepalives, relay-aware probing</span></div><div class="cell"><b>Encrypted</b><span>AES-256-GCM, key derived from a shared secret</span></div></div></div>
+  <div class="foot"><span>TypeScript on Node.js built-ins for the mesh · React and Leaflet for the dashboard · one Docker image per device</span><b>15 nodes on 3 devices in the demo</b></div>
+</div>
+
+<!-- 3.6.2 orchestration pipeline -->
+<div class="fig" id="3.6.2" hidden>
+  <h1><span class="num">3.6.2</span>Capability-aware orchestration<small>Every node runs the same pure function over its own view of who is alive, so every node gets the same answer.</small></h1>
+  <div class="row" style="top:180px">
+    <div class="lbl">Missile reported<small>all nodes alive</small></div><div class="arrow">→</div>
+    <div class="stage"><h3>1 · Alive and covers the threat</h3><div class="nodes">
+      <span class="nd out"><i></i>MAELSTROM <small>L1 · swarm</small></span><span class="nd"><i></i>AEGIS <small>L2 · cost 5</small></span><span class="nd"><i></i>SmartFalcon <small>L3 · cost 5</small></span><span class="nd"><i></i>EdgeFuse <small>L4 · cost 6</small></span><span class="nd out"><i></i>WISL <small>EMP · swarm</small></span></div></div>
+    <div class="arrow">→</div>
+    <div class="stage"><h3>2 · Order</h3><p style="margin:0;font-size:17px;line-height:1.5">layer, then cost, then id.<br>Total order ⇒ identical result on every converged node.</p></div>
+    <div class="arrow">→</div>
+    <div class="stage"><h3>3 · Chain</h3><div class="chain"><span class="c primary">AEGIS</span><span class="sep">→</span><span class="c">SmartFalcon</span><span class="sep">→</span><span class="c">EdgeFuse</span></div><p style="margin:14px 0 0;font-size:15px;color:var(--muted)">Only AEGIS's device may engage or neutralise; anyone else is rejected and logged.</p></div>
+  </div>
+  <div class="row" style="top:470px">
+    <div class="lbl">Same missile<small>AEGIS convicted dead</small></div><div class="arrow">→</div>
+    <div class="stage"><h3>1 · Alive and covers the threat</h3><div class="nodes">
+      <span class="nd out"><i></i>MAELSTROM</span><span class="nd dead"><i></i>AEGIS</span><span class="nd"><i></i>SmartFalcon <small>L3</small></span><span class="nd"><i></i>EdgeFuse <small>L4</small></span><span class="nd out"><i></i>WISL</span></div></div>
+    <div class="arrow">→</div>
+    <div class="stage"><h3>2 · Order</h3><p style="margin:0;font-size:17px;line-height:1.5">unchanged.<br>Escalation is not a mechanism: the dead node simply left the input.</p></div>
+    <div class="arrow">→</div>
+    <div class="stage"><h3>3 · Chain</h3><div class="chain"><span class="c primary">SmartFalcon</span><span class="sep">→</span><span class="c">EdgeFuse</span></div><p style="margin:14px 0 0;font-size:15px;color:var(--muted)">When AEGIS rejoins it is rediscovered within a probe cycle and the chain returns to the top row.</p></div>
+  </div>
+  <div class="foot"><span>Declarations: MAELSTROM swarm · L1 · 8 &nbsp; AEGIS missile, aircraft · L2 · 5 &nbsp; SmartFalcon missile, aircraft · L3 · 5 &nbsp; EdgeFuse missile, aircraft, swarm · L4 · 6 &nbsp; WISL EMP, swarm · L5 · 2</span><b>no leader · no negotiation</b></div>
+</div>
+
+<!-- 3.6.3 integration -->
+<div class="fig" id="3.6.3" hidden>
+  <h1><span class="num">3.6.3</span>Integration with partner teams<small>A partner runs one MAELSTROM node next to its own software and talks to it locally. The node does the rest.</small></h1>
+  <div class="box" style="left:72px;top:200px;width:380px;height:330px"><h2>Partner system software</h2><p>AEGIS, SmartFalcon, EdgeFuse, WISL, or a new system.</p>
+    <p style="margin-top:14px"><b style="color:var(--text)">Needs to provide</b></p><span class="chip">service name</span><span class="chip">capability declaration</span><span class="chip">shared mesh key</span><span class="chip">one lighthouse address</span>
+    <p style="margin-top:16px">Learns that it is responsible for a track <b style="color:var(--text)">from its own node</b>, never from a central server.</p></div>
+  <div style="position:absolute;left:452px;top:330px;width:150px;text-align:center;color:var(--accent);font-size:15px;font-weight:600"><div style="font-size:34px;line-height:1">⇄</div>local HTTP<br><span style="color:var(--muted);font-weight:400">token-protected</span></div>
+  <div class="box" style="left:602px;top:200px;width:400px;height:330px;border-color:var(--alive)"><h2>MAELSTROM node</h2><p>one small process per system</p>
+    <ul class="api"><li><code>POST /send</code> flood a message to every member</li><li><code>POST /threat</code> report a threat, get the mesh's assignment</li><li><code>GET /members</code> who is alive, suspect, dead</li><li><code>GET /tracks</code> replicated track table with responsibility</li><li><code>GET /health</code> liveness</li></ul></div>
+  <div style="position:absolute;left:1002px;top:330px;width:150px;text-align:center;color:var(--alive);font-size:15px;font-weight:600"><div style="font-size:34px;line-height:1">⇄</div>UDP gossip<br><span style="color:var(--muted);font-weight:400">AES-256-GCM</span></div>
+  <div class="box" style="left:1152px;top:200px;width:376px;height:330px;border-style:dashed"><h2>The mesh</h2><p>every other partner's node, on any device</p>
+    <div style="margin-top:12px"><span class="nd"><i></i>MAELSTROM · Mac</span> <span class="nd"><i></i>AEGIS · VM</span> <span class="nd"><i></i>SmartFalcon · Mac</span> <span class="nd"><i></i>EdgeFuse · VM</span> <span class="nd"><i></i>WISL · Mac 2</span></div>
+    <p style="margin-top:14px">Assignments and engagement events arrive here as floods and land in every node's track table.</p></div>
+  <div class="box" style="left:72px;top:570px;right:72px;height:150px;background:var(--bg)"><h2 style="font-size:19px">Fixed message vocabulary</h2>
+    <span class="chip k">gcs.signal</span><span class="chip k">threat assignment</span><span class="chip">track.detected</span><span class="chip">track.update</span><span class="chip">track.engaging</span><span class="chip">track.handover</span><span class="chip">track.neutralised</span><span class="chip">track.lost</span><span class="chip">track.impact</span>
+    <p style="margin-top:10px">Any station on any device may report. Only the responsible device's engage and neutralise are accepted; a Command override is allowed and logged.</p></div>
+  <div class="foot"><span>In the hackathon, partner systems were represented by their nodes and declarations; connecting a real effector means pointing its control software at the local node interface.</span><b>one node per system</b></div>
+</div>
+
+<!-- 3.6.4 demonstrated capabilities -->
+<div class="fig" id="3.6.4" hidden>
+  <h1><span class="num">3.6.4</span>Demonstrated capabilities<small>Shown live during development; reproducible with the scripts in the repository.</small></h1>
+  <div class="tiles">
+    <div class="tile"><svg class="ic" viewBox="0 0 56 56"><circle cx="28" cy="28" r="22" fill="none" stroke="#139a6e" stroke-width="4"/><path d="M18 29l7 7 14-15" fill="none" stroke="#139a6e" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/></svg><b>Self-healing across the internet</b><p>15 nodes on 3 devices, Singapore and Japan, through NAT. A killed node is suspected in seconds, convicted, and rediscovered within a probe cycle when revived.</p><span class="m">suspect ≈ 2–4 s · rediscovered ≈ 2 s</span></div>
+    <div class="tile"><svg class="ic" viewBox="0 0 56 56"><rect x="12" y="24" width="32" height="24" rx="5" fill="none" stroke="#2f6fd6" stroke-width="4"/><path d="M19 24v-6a9 9 0 0118 0v6" fill="none" stroke="#2f6fd6" stroke-width="4"/></svg><b>Encrypted end to end</b><p>Every gossip and application frame is AES-256-GCM under a key derived from a shared secret. The preflight refuses to run unencrypted.</p><span class="m">AES-256-GCM · HKDF</span></div>
+    <div class="tile"><svg class="ic" viewBox="0 0 56 56"><circle cx="14" cy="14" r="6" fill="#c4479a"/><circle cx="42" cy="14" r="6" fill="#c4479a"/><circle cx="14" cy="42" r="6" fill="#c4479a"/><circle cx="42" cy="42" r="6" fill="#c4479a"/><circle cx="28" cy="28" r="6" fill="#c4479a"/><path d="M14 14l28 28M42 14L14 42" stroke="#c4479a" stroke-width="2" opacity=".5"/></svg><b>One-entity decisions</b><p>A threat from any node yields the identical assignment and fallback chain on every node. Kill the primary and the next report resolves to the fallback; revive it and the answer returns.</p><span class="m">5/5 agree in every check</span></div>
+    <div class="tile"><svg class="ic" viewBox="0 0 56 56"><path d="M10 40l12-14 8 8 16-20" fill="none" stroke="#c98a12" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/><circle cx="46" cy="14" r="5" fill="#c98a12"/></svg><b>Replicated engagement lifecycle</b><p>A swarm reported from the Mac was matchmade to the Azure VM in about a second, engaged and neutralised from the VM's console, and every device showed the same state.</p><span class="m">report → responsible ≈ 1 s</span></div>
+    <div class="tile"><svg class="ic" viewBox="0 0 56 56"><path d="M8 44c10-4 14-24 24-24s10 10 16 10" fill="none" stroke="#6f5fd6" stroke-width="4" stroke-linecap="round"/><circle cx="48" cy="30" r="5" fill="#6f5fd6"/></svg><b>Simulated tracks at 1 Hz</b><p>Launched targets stream their trajectory to every device once a second. Four scripted scenarios exercise the chain: cruise missile, two swarm waves, saturation, aircraft probe.</p><span class="m">1 update / s · every device</span></div>
+    <div class="tile"><svg class="ic" viewBox="0 0 56 56"><rect x="10" y="10" width="36" height="36" rx="6" fill="none" stroke="#5b6a86" stroke-width="4"/><path d="M18 28h20M18 20h20M18 36h12" stroke="#5b6a86" stroke-width="4" stroke-linecap="round"/></svg><b>Operational readiness</b><p>A judging-day preflight checks dashboard, fleet, encryption, convergence, remote devices, map and cross-node agreement, and answers GO or NO-GO with the reason.</p><span class="m">≈ 285 MB per device for the full fleet</span></div>
+  </div>
+  <div class="foot"><span>Real: processes, gossip, failure detection, encryption, the internet path, the replicated decisions. Simulated: threats, trajectories, assets.</span><b>GO — ready for the judges</b></div>
+</div>
+
+<script>window.show = (id) => { for (const f of document.querySelectorAll(".fig")) f.hidden = f.id !== id; return !!document.getElementById(id); };</script>
